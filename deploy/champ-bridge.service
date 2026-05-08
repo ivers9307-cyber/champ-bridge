@@ -1,0 +1,34 @@
+# systemd unit for champ-bridge.
+# Install:
+#   sudo cp deploy/champ-bridge.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now champ-bridge
+# Logs:
+#   sudo journalctl -u champ-bridge -f
+
+[Unit]
+Description=CHAMP heart rate bridge
+After=network-online.target bluetooth.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/champ-bridge
+EnvironmentFile=/home/pi/champ-bridge/.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /home/pi/champ-bridge/src/index.js
+Restart=always
+RestartSec=10
+# Don't fight the OS for cycles — chest-strap traffic is light.
+Nice=5
+
+# Hardening — bridge only needs network + bluetooth, nothing else.
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
