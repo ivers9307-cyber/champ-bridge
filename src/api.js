@@ -51,7 +51,8 @@ export async function postHeartbeat({ status = 'online' } = {}) {
  * Send a batch of samples. Server caps at 1000 per request so the
  * caller (samples-buffer) splits if needed.
  *
- * @param {Array<{ strap_mac: string, recorded_at: string, bpm: number }>} samples
+ * @param {Array<{ device_key: string, recorded_at: string, bpm: number }>} samples
+ *        device_key is protocol-aware — `ant:12345` or `ble:AA:BB:..`.
  */
 export async function postSamples(samples) {
   if (!samples || samples.length === 0) return { ok: true, statusCode: 200, body: { ok: true } }
@@ -60,7 +61,7 @@ export async function postSamples(samples) {
 
 /**
  * Send the current "I'm broadcasting" snapshot.
- * @param {Array<{ mac: string, name?: string, rssi?: number, last_bpm?: number }>} straps
+ * @param {Array<{ device_key: string, name?: string, rssi?: number, last_bpm?: number }>} straps
  */
 export async function postScan(straps) {
   return postJson('/api/bridge/scan', { straps })

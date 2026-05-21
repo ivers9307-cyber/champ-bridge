@@ -1,7 +1,7 @@
 // champ-bridge entry point. Wires up:
-//   1. BLE adapter (real or fake) → emits strap-sample events
+//   1. Strap source (ANT+ primary + BLE fallback) → strap-sample events
 //   2. Sample buffer → batches + flushes to /api/bridge/samples
-//   3. Scan loop → posts current connected straps to /api/bridge/scan
+//   3. Scan loop → posts current visible straps to /api/bridge/scan
 //   4. Heartbeat loop → /api/bridge/heartbeat when otherwise idle
 //
 // The bridge stays running even if the API is offline; we buffer
@@ -10,30 +10,34 @@
 
 import { config } from './config.js'
 import { logInfo, logWarn, logError } from './log.js'
-import { createBleAdapter } from './ble.js'
+import { createStrapSource } from './strap-source.js'
 import { pushSample, startFlushLoop, pendingCount } from './buffer.js'
 import { postHeartbeat, postScan } from './api.js'
 
 async function main() {
   logInfo('bridge', 'champ-bridge starting', {
-    apiUrl: config.apiUrl, fakeBle: config.fakeBle, version: config.softwareVersion,
+    apiUrl: config.apiUrl,
+    fakeStraps: config.fakeStraps,
+    ant: config.enableAnt,
+    ble: config.enableBle,
+    version: config.softwareVersion,
   })
 
-  const ble = createBleAdapter()
+  const straps = createStrapSource()
 
-  ble.on('strap-sample', (s) => {
-    pushSample({ strap_mac: s.mac, recorded_at: s.recorded_at, bpm: s.bpm })
+  straps.on('strap-sample', (s) => {
+    pushSample({ device_key: s.device_key, recorded_at: s.recorded_at, bpm: s.bpm })
   })
 
-  ble.on('strap-seen', (info) => {
+  straps.on('strap-seen', (info) => {
     logInfo('bridge', 'strap seen', info)
   })
 
-  ble.on('strap-lost', (mac) => {
-    logInfo('bridge', 'strap lost', { mac })
+  straps.on('strap-lost', (deviceKey) => {
+    logInfo('bridge', 'strap lost', { device_key: deviceKey })
   })
 
-  await ble.start()
+  await straps.start()
 
   // Initial heartbeat tells the server "I'm online with this version".
   await postHeartbeat({ status: 'online' }).catch((err) => {
@@ -44,8 +48,7 @@ async function main() {
 
   const scanTimer = setInterval(async () => {
     try {
-      const straps = ble.getCurrentStraps()
-      await postScan(straps)
+      await postScan(straps.getCurrentStraps())
     } catch (err) {
       logWarn('bridge', 'scan post threw', { err })
     }
@@ -72,7 +75,7 @@ async function main() {
     clearInterval(flushTimer)
     clearInterval(scanTimer)
     clearInterval(heartbeatTimer)
-    await ble.stop().catch(() => {})
+    await straps.stop().catch(() => {})
     await postHeartbeat({ status: 'error' }).catch(() => {})
     process.exit(0)
   }
