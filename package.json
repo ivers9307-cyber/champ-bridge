@@ -1,9 +1,9 @@
 {
   "name": "champ-bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "BLE → un1t-crm heart rate bridge. Runs on a Pi at each studio.",
+  "description": "ANT+ / BLE → un1t-crm heart rate bridge. Runs on a Pi at each studio.",
   "main": "src/index.js",
   "engines": {
     "node": ">=20"
@@ -11,12 +11,13 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "fake": "FAKE_BLE=1 node src/index.js",
+    "fake": "FAKE_STRAPS=1 node src/index.js",
     "test": "vitest run",
     "lint": "eslint src/"
   },
   "dependencies": {
     "@abandonware/noble": "^1.9.2-25",
+    "ant-plus-next": "^0.4.0",
     "undici": "^7.0.0"
   },
   "devDependencies": {

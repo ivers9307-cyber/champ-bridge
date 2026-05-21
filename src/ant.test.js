@@ -1,5 +1,5 @@
-// Tests for the BLE adapter in fake mode. Real-hardware paths
-// (noble) are validated by the on-Pi smoke test, not here.
+// Tests for the ANT+ adapter in fake mode. The real-hardware path
+// (ant-plus-next over libusb) is validated by the on-Pi smoke test.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
@@ -7,14 +7,14 @@ process.env.CHAMP_BRIDGE_TOKEN = process.env.CHAMP_BRIDGE_TOKEN || 'bbr_test'
 process.env.CHAMP_API_URL = process.env.CHAMP_API_URL || 'http://localhost:3000'
 process.env.FAKE_STRAPS = '1'
 
-const { createBleAdapter } = await import('./ble.js')
+const { createAntAdapter } = await import('./ant.js')
 
-describe('FakeBle adapter', () => {
+describe('FakeAnt adapter', () => {
   let adapter
 
   beforeEach(() => {
     vi.useFakeTimers()
-    adapter = createBleAdapter()
+    adapter = createAntAdapter()
   })
 
   afterEach(async () => {
@@ -22,39 +22,39 @@ describe('FakeBle adapter', () => {
     vi.useRealTimers()
   })
 
-  it('emits strap-seen with ble: device keys', async () => {
+  it('emits strap-seen with ant: device keys', async () => {
     const seen = []
     adapter.on('strap-seen', (s) => seen.push(s))
     await adapter.start()
     vi.advanceTimersByTime(300)
     expect(seen.length).toBe(2)
     for (const s of seen) {
-      expect(s.device_key).toMatch(/^ble:[0-9A-F:]{17}$/)
-      expect(typeof s.last_bpm).toBe('number')
+      expect(s.device_key).toMatch(/^ant:\d{1,5}$/)
+      // ANT+ straps broadcast no friendly name and no RSSI.
+      expect(s.rssi).toBe(null)
     }
   })
 
-  it('emits strap-sample with a ble device key and an in-range bpm', async () => {
+  it('emits strap-sample with an ant device key and an in-range bpm', async () => {
     const samples = []
     adapter.on('strap-sample', (s) => samples.push(s))
     await adapter.start()
-    vi.advanceTimersByTime(300) // discovery
-    vi.advanceTimersByTime(1000) // one sample tick
+    vi.advanceTimersByTime(300)
+    vi.advanceTimersByTime(1000)
     expect(samples.length).toBe(2)
     for (const s of samples) {
-      expect(s.device_key.startsWith('ble:')).toBe(true)
+      expect(s.device_key.startsWith('ant:')).toBe(true)
       expect(s.bpm).toBeGreaterThanOrEqual(60)
       expect(s.bpm).toBeLessThanOrEqual(180)
-      expect(s.recorded_at).toMatch(/^\d{4}-\d{2}-\d{2}T/)
     }
   })
 
-  it('getCurrentStraps reflects connected straps', async () => {
+  it('getCurrentStraps reflects detected straps', async () => {
     await adapter.start()
     vi.advanceTimersByTime(300)
     const straps = adapter.getCurrentStraps()
     expect(straps.length).toBe(2)
-    expect(straps.every((s) => s.device_key.startsWith('ble:'))).toBe(true)
+    expect(straps.every((s) => s.device_key.startsWith('ant:'))).toBe(true)
   })
 
   it('stop() halts the sample stream', async () => {

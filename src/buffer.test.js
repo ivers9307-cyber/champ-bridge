@@ -5,6 +5,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('./api.js', () => ({
   postSamples: vi.fn(),
+  // (samples carry a protocol-aware device_key — see device-key.js)
 }))
 // Also need to satisfy config.js loading — it bails if env is missing.
 process.env.CHAMP_BRIDGE_TOKEN = process.env.CHAMP_BRIDGE_TOKEN || 'bbr_test'
@@ -22,8 +23,8 @@ beforeEach(() => {
 
 describe('pushSample / pendingCount', () => {
   it('accumulates samples until flush', () => {
-    pushSample({ strap_mac: 'AA:BB:CC:DD:EE:FF', recorded_at: '2026-05-08T00:00:00.000Z', bpm: 120 })
-    pushSample({ strap_mac: 'AA:BB:CC:DD:EE:FF', recorded_at: '2026-05-08T00:00:01.000Z', bpm: 121 })
+    pushSample({ device_key: 'ble:AA:BB:CC:DD:EE:FF', recorded_at: '2026-05-08T00:00:00.000Z', bpm: 120 })
+    pushSample({ device_key: 'ble:AA:BB:CC:DD:EE:FF', recorded_at: '2026-05-08T00:00:01.000Z', bpm: 121 })
     expect(pendingCount()).toBe(2)
   })
 })
@@ -36,7 +37,7 @@ describe('flushSamples', () => {
   it('sends in single chunk under 1000 samples', async () => {
     postSamples.mockResolvedValue({ ok: true })
     for (let i = 0; i < 50; i++) {
-      pushSample({ strap_mac: 'AA:BB:CC:DD:EE:FF', recorded_at: new Date().toISOString(), bpm: 120 })
+      pushSample({ device_key: 'ant:12345', recorded_at: new Date().toISOString(), bpm: 120 })
     }
     const out = await flushSamples()
     expect(out.sent).toBe(50)
@@ -47,7 +48,7 @@ describe('flushSamples', () => {
   it('chunks at 1000 samples', async () => {
     postSamples.mockResolvedValue({ ok: true })
     for (let i = 0; i < 1500; i++) {
-      pushSample({ strap_mac: 'AA:BB:CC:DD:EE:FF', recorded_at: new Date().toISOString(), bpm: 120 })
+      pushSample({ device_key: 'ble:AA:BB:CC:DD:EE:FF', recorded_at: new Date().toISOString(), bpm: 120 })
     }
     const out = await flushSamples()
     expect(out.sent).toBe(1500)
@@ -59,7 +60,7 @@ describe('flushSamples', () => {
       .mockResolvedValueOnce({ ok: true })   // first chunk fine
       .mockResolvedValueOnce({ ok: false, networkError: true }) // second fails
     for (let i = 0; i < 1500; i++) {
-      pushSample({ strap_mac: 'AA:BB:CC:DD:EE:FF', recorded_at: new Date().toISOString(), bpm: 120 })
+      pushSample({ device_key: 'ble:AA:BB:CC:DD:EE:FF', recorded_at: new Date().toISOString(), bpm: 120 })
     }
     const out = await flushSamples()
     expect(out.sent).toBe(1000)
@@ -72,7 +73,7 @@ describe('flushSamples', () => {
 describe('overflow', () => {
   it('drops oldest when buffer exceeds MAX_BUFFER (5000)', () => {
     for (let i = 0; i < 5500; i++) {
-      pushSample({ strap_mac: 'AA:BB:CC:DD:EE:FF', recorded_at: new Date(Date.now() + i).toISOString(), bpm: 120 })
+      pushSample({ device_key: 'ble:AA:BB:CC:DD:EE:FF', recorded_at: new Date(Date.now() + i).toISOString(), bpm: 120 })
     }
     expect(pendingCount()).toBe(5000)
   })
