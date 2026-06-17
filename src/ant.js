@@ -8,9 +8,14 @@
 // which is what makes it the right fit for a full class.
 //
 // Library: ant-plus-next (lazy-imported, real mode only). It is the
-// maintained successor to the classic `ant-plus` package and keeps
-// the well-proven HeartRateScanner / hbData API. Talks to the stick
-// over libusb — provision `libusb-1.0-0-dev` on the Pi (see README).
+// maintained successor to the classic `ant-plus` package. Talks to the
+// stick over libusb — provision `libusb-1.0-0-dev` on the Pi (see README).
+//
+// NB: ant-plus-next RENAMED the data event from the classic ant-plus
+// `hbData` to `heartRateData` (and the field `DeviceID` → `DeviceId`).
+// Listening on the old `hbData` name silently never fires — every
+// heartbeat page is dropped and no strap is ever seen. This cost us the
+// first real-hardware bring-up; do not "fix" it back to hbData.
 //
 // Every event payload identifies the strap by a `device_key` (see
 // device-key.js) — here always `ant:<deviceNumber>`:
@@ -105,8 +110,9 @@ class RealAnt extends EventEmitter {
     const scanner = new HeartRateScanner(stick)
     this._scanner = scanner
 
-    // hbData fires once per heartbeat page, for EVERY strap in range.
-    scanner.on('hbData', (data) => {
+    // heartRateData fires once per heartbeat page, for EVERY strap in
+    // range. (ant-plus-next renamed this from the classic `hbData`.)
+    scanner.on('heartRateData', (data) => {
       const antId = data?.DeviceId ?? data?.DeviceID
       const bpm = Number(data?.ComputedHeartRate)
       const key = makeDeviceKey('ant', antId)
