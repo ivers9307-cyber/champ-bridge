@@ -6,7 +6,7 @@ import { describe, it, expect, vi } from 'vitest'
 process.env.CHAMP_BRIDGE_TOKEN = process.env.CHAMP_BRIDGE_TOKEN || 'bbr_test'
 process.env.CHAMP_API_URL = process.env.CHAMP_API_URL || 'http://localhost:3000'
 
-const { withinDailyCap, utcDateKey, runInbodyCycle } = await import('./inbody.js')
+const { withinDailyCap, utcDateKey, runInbodyCycle, inbodyDataUrl } = await import('./inbody.js')
 
 const okIngest = vi.fn(async (results) => ({ ok: true, body: { processed: results.length, linked: 0 } }))
 const okFetch = vi.fn(async () => ({ ok: true, statusCode: 200, body: { Weight: 80 } }))
@@ -27,6 +27,17 @@ describe('withinDailyCap', () => {
 describe('utcDateKey', () => {
   it('returns the YYYY-MM-DD UTC date', () => {
     expect(utcDateKey(new Date('2024-03-09T23:30:00Z'))).toBe('2024-03-09')
+  })
+})
+
+describe('inbodyDataUrl', () => {
+  it('puts usertoken + datetimes in the URL path (not the body)', () => {
+    expect(inbodyDataUrl('https://apieur.lookinbody.com', '353871234567', '20240101120000'))
+      .toBe('https://apieur.lookinbody.com/inbody/GetFullInBodyData/353871234567/20240101120000')
+  })
+  it('strips a trailing slash on the base and url-encodes the segments', () => {
+    expect(inbodyDataUrl('https://apieur.lookinbody.com/', '08 7/1', '2024'))
+      .toBe('https://apieur.lookinbody.com/inbody/GetFullInBodyData/08%207%2F1/2024')
   })
 })
 
