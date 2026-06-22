@@ -21,6 +21,16 @@
 //   MAX_CONNECTIONS=30     soft cap on concurrent BLE connections
 //                          (ANT+ is connectionless — no equivalent)
 //   LOG_LEVEL=info         debug | info | warn | error
+//
+// InBody / Lookin'Body enrichment (optional — only runs when both
+// INBODY_API_KEY and INBODY_ACCOUNT are set). The Pi is the whitelisted-IP
+// fetcher: it polls the CRM for scans needing data, pulls them from the
+// Lookin'Body REST API, and relays them back. The API key never leaves the Pi.
+//   INBODY_API_KEY         WebAPI key from the InBody portal (secret)
+//   INBODY_ACCOUNT         account id, e.g. stillorganun1t
+//   INBODY_API_URL         default https://apieur.lookinbody.com
+//   INBODY_POLL_MS=300000  how often to poll the CRM for pending scans
+//   INBODY_DAILY_CAP=450   safety cap under InBody's 500 calls/device/day
 
 const required = ['CHAMP_BRIDGE_TOKEN', 'CHAMP_API_URL']
 const missing = required.filter((k) => !process.env[k])
@@ -44,4 +54,11 @@ export const config = {
   maxConnections: parseInt(process.env.MAX_CONNECTIONS, 10) || 30,
   logLevel: process.env.LOG_LEVEL || 'info',
   softwareVersion: process.env.npm_package_version || '0.2.0',
+  // InBody enrichment — only active when both key + account are present.
+  inbodyApiKey: process.env.INBODY_API_KEY || null,
+  inbodyAccount: process.env.INBODY_ACCOUNT || null,
+  inbodyApiUrl: (process.env.INBODY_API_URL || 'https://apieur.lookinbody.com').replace(/\/+$/, ''),
+  inbodyPollMs: parseInt(process.env.INBODY_POLL_MS, 10) || 300_000,
+  inbodyDailyCap: parseInt(process.env.INBODY_DAILY_CAP, 10) || 450,
+  get inbodyEnabled() { return !!(this.inbodyApiKey && this.inbodyAccount) },
 }

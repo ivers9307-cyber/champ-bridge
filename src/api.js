@@ -40,11 +40,50 @@ async function postJson(path, body) {
   }
 }
 
+async function getJson(path) {
+  const url = `${config.apiUrl}${path}`
+  try {
+    const res = await request(url, {
+      method: 'GET',
+      headers: COMMON_HEADERS,
+      bodyTimeout: 10_000,
+      headersTimeout: 10_000,
+    })
+    let parsed = null
+    try { parsed = await res.body.json() } catch { /* response without body */ }
+    if (res.statusCode >= 400) {
+      logWarn('api', `${path} returned ${res.statusCode}`, { body: parsed })
+      return { ok: false, statusCode: res.statusCode, body: parsed }
+    }
+    logDebug('api', `${path} ok`, { body: parsed })
+    return { ok: true, statusCode: res.statusCode, body: parsed }
+  } catch (err) {
+    logWarn('api', `${path} network error`, { err })
+    return { ok: false, networkError: true, err }
+  }
+}
+
 export async function postHeartbeat({ status = 'online' } = {}) {
   return postJson('/api/bridge/heartbeat', {
     software_version: config.softwareVersion,
     status,
   })
+}
+
+/**
+ * InBody enrichment — get scans still needing their measurements pulled.
+ * @returns {Promise<{ ok, body?: { pending: Array<{event_id,usertoken,datetimes}> } }>}
+ */
+export async function getInbodyPending() {
+  return getJson('/api/bridge/inbody/pending')
+}
+
+/**
+ * InBody enrichment — relay fetched GetFullInBodyData responses to the CRM.
+ * @param {Array<{ event_id: string, raw: object }>} results
+ */
+export async function postInbodyIngest(results) {
+  return postJson('/api/bridge/inbody/ingest', { results })
 }
 
 /**

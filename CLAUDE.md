@@ -54,7 +54,7 @@ duplicated verbatim into un1t-crm and champ-app.
 
 ```
 src/
-  index.js        entrypoint — strap-source → buffer → flush + scan + heartbeat
+  index.js        entrypoint — strap-source → buffer → flush + scan + heartbeat (+ inbody)
   config.js       env loading + validation (fails fast at import time)
   log.js          structured logger (mirrors un1t-crm/src/lib/log.js)
   api.js          HTTP client (undici); never throws — returns {ok, body}
@@ -63,9 +63,24 @@ src/
   ant.js          ANT+ adapter — RealAnt (ant-plus-next) or FakeAnt
   ble.js          BLE adapter — RealBle (noble) or FakeBle
   buffer.js       bounded sample queue + chunked flush with retry
+  inbody.js       InBody enrichment poller (optional; whitelisted-IP fetch)
 deploy/
   champ-bridge.service   systemd unit
 ```
+
+## InBody enrichment (optional)
+
+InBody's Lookin'Body REST API only accepts calls from a whitelisted IP, and
+Vercel's egress IPs rotate — so the Pi (which sits on the gym's static public
+IP, next to the scanner) is the fetcher. When `INBODY_API_KEY` +
+`INBODY_ACCOUNT` are set, `inbody.js` polls the CRM (`GET /api/bridge/inbody/
+pending`) for scans needing data, pulls each from `POST /inbody/
+GetFullInBodyData` (API-KEY + Account headers), and relays the raw responses to
+`POST /api/bridge/inbody/ingest`, where the CRM maps + matches + stores them.
+The API key never leaves the Pi. InBody caps each device at 500 calls/day
+(resets 00:00 UTC); `inbody.js` keeps a per-day counter and stops at
+`INBODY_DAILY_CAP` (450). Whitelist the Pi's egress IP — `curl -s
+https://ifconfig.me` — in the InBody portal.
 
 Every adapter emits the same event shape, keyed by `device_key`:
 `strap-seen` `{device_key,name?,rssi?,last_bpm?}`,

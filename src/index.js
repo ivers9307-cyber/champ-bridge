@@ -3,6 +3,8 @@
 //   2. Sample buffer → batches + flushes to /api/bridge/samples
 //   3. Scan loop → posts current visible straps to /api/bridge/scan
 //   4. Heartbeat loop → /api/bridge/heartbeat when otherwise idle
+//   5. InBody poll loop → pulls scan data from Lookin'Body, relays to CRM
+//      (only when INBODY_API_KEY + INBODY_ACCOUNT are configured)
 //
 // The bridge stays running even if the API is offline; we buffer
 // samples (bounded, oldest-dropped) and retry. When the API comes
@@ -13,6 +15,7 @@ import { logInfo, logWarn, logError } from './log.js'
 import { createStrapSource } from './strap-source.js'
 import { pushSample, startFlushLoop, pendingCount } from './buffer.js'
 import { postHeartbeat, postScan } from './api.js'
+import { runInbodyCycle } from './inbody.js'
 
 async function main() {
   logInfo('bridge', 'champ-bridge starting', {
@@ -67,6 +70,24 @@ async function main() {
     }
   }, config.heartbeatMs)
 
+  // InBody enrichment loop — only when configured. The Pi is the
+  // whitelisted-IP fetcher: poll the CRM for scans needing data, pull each
+  // from Lookin'Body, relay back. State carries the per-UTC-day call counter.
+  let inbodyTimer = null
+  if (config.inbodyEnabled) {
+    logInfo('inbody', 'InBody enrichment enabled', {
+      apiUrl: config.inbodyApiUrl,
+      account: config.inbodyAccount,
+      pollMs: config.inbodyPollMs,
+      dailyCap: config.inbodyDailyCap,
+    })
+    const inbodyState = { day: null, sent: 0 }
+    const inbodyTick = () =>
+      runInbodyCycle(inbodyState).catch((err) => logWarn('inbody', 'cycle threw', { err }))
+    inbodyTick() // kick once on boot, then on the poll interval
+    inbodyTimer = setInterval(inbodyTick, config.inbodyPollMs)
+  }
+
   // Graceful shutdown. systemd sends SIGTERM on stop; we want to
   // disconnect from straps cleanly before exiting so the next start
   // doesn't hit lingering connections.
@@ -75,6 +96,7 @@ async function main() {
     clearInterval(flushTimer)
     clearInterval(scanTimer)
     clearInterval(heartbeatTimer)
+    if (inbodyTimer) clearInterval(inbodyTimer)
     await straps.stop().catch(() => {})
     await postHeartbeat({ status: 'error' }).catch(() => {})
     process.exit(0)
