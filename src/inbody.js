@@ -59,6 +59,24 @@ export async function fetchFullInBodyData({ apiUrl, apiKey, account, usertoken, 
   }
 }
 
+// InBody keys members by the phone (TelHP) typed at registration — for this IE
+// gym that's the local format `0871234567`, NOT the CRM's `+353871234567`
+// (E.164). For backfill we don't know which format was used, so we try the most
+// likely candidates in order and use whichever GetDateTimes returns scans for.
+// (The webhook path doesn't need this — it carries InBody's own TelHP.)
+export function inbodyUsertokenCandidates(phone) {
+  const raw = String(phone || '').trim()
+  const digits = raw.replace(/\D/g, '')
+  const last9 = digits.length >= 9 ? digits.slice(-9) : null
+  const out = []
+  const add = (v) => { if (v && !out.includes(v)) out.push(v) }
+  if (last9) add('0' + last9) // IE local — what InBody shows (confirmed live)
+  add(digits)                 // E.164 without the +
+  add(raw)                    // exactly as the CRM stores it (+353…)
+  if (last9) add(last9)       // bare national
+  return out
+}
+
 // GetDateTimes URL — lists a member's scan datetimes. Same URL-path convention
 // as GetFullInBodyData: usertoken in the path, not the body.
 export function inbodyDatetimesUrl(apiUrl, usertoken) {
@@ -198,34 +216,57 @@ export async function runInbodyBackfillCycle(state, deps = {}) {
   for (const req of requests) {
     if (withinDailyCap(state.sent, cap) <= 0) break
 
-    // 1. list the member's scans
-    const dtRes = await datetimesFetcher({ apiUrl, apiKey, account, usertoken: req.phone })
-    state.sent += 1
-    if (!dtRes.ok) {
-      logWarn('inbody', 'backfill GetDateTimes failed', { statusCode: dtRes.statusCode, request_id: req.request_id, body: dtRes.body })
-      await postBackfillIngest({ request_id: req.request_id, error: `GetDateTimes ${dtRes.statusCode ?? 'error'}` })
+    // 1. list the member's scans — try each phone-format candidate until one
+    // returns scans (InBody stores the local 0… format, not the CRM's +353…).
+    let matched = null
+    let datetimes = []
+    let authError = false
+    for (const cand of inbodyUsertokenCandidates(req.phone)) {
+      if (withinDailyCap(state.sent, cap) <= 0) break
+      const dtRes = await datetimesFetcher({ apiUrl, apiKey, account, usertoken: cand })
+      state.sent += 1
+      if (!dtRes.ok) {
+        if (dtRes.statusCode === 401) { authError = true; break } // IP / cap / subscription
+        continue // 400 / no-data for this format → try the next candidate
+      }
+      const dts = extractInbodyDatetimes(dtRes.body)
+      if (dts.length > 0) { matched = cand; datetimes = dts; break }
+      // 200 but empty → wrong format, try the next candidate
+    }
+
+    if (authError) {
+      logWarn('inbody', 'backfill GetDateTimes 401', { request_id: req.request_id })
+      await postBackfillIngest({ request_id: req.request_id, error: 'GetDateTimes 401' })
       handled += 1
-      if (dtRes.statusCode === 401) break // IP / cap / subscription — stop the cycle
+      break // stop the whole cycle — every request will hit the same wall
+    }
+    if (!matched) {
+      // No format returned scans — close the request as done-with-0 so it
+      // doesn't stick at "pending". Member may not be in InBody, or under a
+      // phone format we didn't try.
+      await postBackfillIngest({ request_id: req.request_id, usertoken: null, scans: [] })
+      handled += 1
+      logInfo('inbody', 'backfill no scans for any phone format', { request_id: req.request_id })
       continue
     }
 
-    // 2. pull each scan (respecting remaining daily headroom)
-    const datetimes = extractInbodyDatetimes(dtRes.body)
+    // 2. pull each scan using the matched usertoken (respecting headroom)
     const scans = []
     let hit401 = false
     for (const dt of datetimes) {
       if (withinDailyCap(state.sent, cap) <= 0) break
-      const r = await fetcher({ apiUrl, apiKey, account, usertoken: req.phone, datetimes: dt })
+      const r = await fetcher({ apiUrl, apiKey, account, usertoken: matched, datetimes: dt })
       state.sent += 1
       if (r.ok && r.body) scans.push({ datetimes: dt, raw: r.body })
       else if (r.statusCode === 401) { hit401 = true; break }
     }
 
-    // 3. relay (empty scans still closes the request as done with 0)
-    const ingestRes = await postBackfillIngest({ request_id: req.request_id, scans })
+    // 3. relay with the matched usertoken so the CRM keys the scan on InBody's
+    // own format (dedupes against the webhook path).
+    const ingestRes = await postBackfillIngest({ request_id: req.request_id, usertoken: matched, scans })
     if (ingestRes.ok) ingested += ingestRes.body?.ingested ?? 0
     handled += 1
-    logInfo('inbody', 'backfill complete', { request_id: req.request_id, found: datetimes.length, scans: scans.length })
+    logInfo('inbody', 'backfill complete', { request_id: req.request_id, usertoken: matched, found: datetimes.length, scans: scans.length })
     if (hit401) break
   }
 
