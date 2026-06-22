@@ -87,6 +87,23 @@ export async function postInbodyIngest(results) {
 }
 
 /**
+ * InBody backfill — get on-demand "sync this member" requests to process.
+ * @returns {Promise<{ ok, body?: { pending: Array<{request_id,phone}> } }>}
+ */
+export async function getInbodyBackfillPending() {
+  return getJson('/api/bridge/inbody/backfill-pending')
+}
+
+/**
+ * InBody backfill — relay a member's full scan history (or an error) for one
+ * request. Pass `scans` to complete it, or `error` if GetDateTimes failed.
+ * @param {{ request_id: string, scans?: Array<{datetimes: string, raw: object}>, error?: string }} payload
+ */
+export async function postInbodyBackfillIngest(payload) {
+  return postJson('/api/bridge/inbody/backfill-ingest', payload)
+}
+
+/**
  * Send a batch of samples. Server caps at 1000 per request so the
  * caller (samples-buffer) splits if needed.
  *
