@@ -82,6 +82,13 @@ The API key never leaves the Pi. InBody caps each device at 500 calls/day
 `INBODY_DAILY_CAP` (450). Whitelist the Pi's egress IP — `curl -s
 https://ifconfig.me` — in the InBody portal.
 
+The same tick also runs an **on-demand backfill** (`runInbodyBackfillCycle`):
+when an operator clicks "Sync InBody" on a contact, the CRM queues a request;
+the Pi polls `GET /api/bridge/inbody/backfill-pending`, calls `GetDateTimes`
+for that phone → `GetFullInBodyData` per scan, and relays the lot to `POST
+/api/bridge/inbody/backfill-ingest`. Shares the same daily-cap counter as the
+enrich cycle. This is how members scanned *before* the integration get pulled.
+
 Every adapter emits the same event shape, keyed by `device_key`:
 `strap-seen` `{device_key,name?,rssi?,last_bpm?}`,
 `strap-sample` `{device_key,recorded_at,bpm}`, `strap-lost` `device_key`.

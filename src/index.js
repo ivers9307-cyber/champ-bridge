@@ -15,7 +15,7 @@ import { logInfo, logWarn, logError } from './log.js'
 import { createStrapSource } from './strap-source.js'
 import { pushSample, startFlushLoop, pendingCount } from './buffer.js'
 import { postHeartbeat, postScan } from './api.js'
-import { runInbodyCycle } from './inbody.js'
+import { runInbodyCycle, runInbodyBackfillCycle } from './inbody.js'
 
 async function main() {
   logInfo('bridge', 'champ-bridge starting', {
@@ -81,9 +81,14 @@ async function main() {
       pollMs: config.inbodyPollMs,
       dailyCap: config.inbodyDailyCap,
     })
+    // One shared daily-cap counter for both the go-forward enrich and the
+    // on-demand backfill. Enrich first (time-sensitive new scans), then drain
+    // any backfill requests with whatever call headroom is left.
     const inbodyState = { day: null, sent: 0 }
-    const inbodyTick = () =>
-      runInbodyCycle(inbodyState).catch((err) => logWarn('inbody', 'cycle threw', { err }))
+    const inbodyTick = async () => {
+      await runInbodyCycle(inbodyState).catch((err) => logWarn('inbody', 'cycle threw', { err }))
+      await runInbodyBackfillCycle(inbodyState).catch((err) => logWarn('inbody', 'backfill threw', { err }))
+    }
     inbodyTick() // kick once on boot, then on the poll interval
     inbodyTimer = setInterval(inbodyTick, config.inbodyPollMs)
   }
