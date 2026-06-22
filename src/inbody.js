@@ -27,19 +27,28 @@ export function utcDateKey(d = new Date()) {
 }
 
 // Pull one scan's full measurement set from the Lookin'Body REST API.
-// Never throws — returns { ok, statusCode, body }.
+// Build the GetFullInBodyData URL. Per the InBody docs the usertoken +
+// datetimes go in the request URL path ("add {usertoken} and {datetimes} in
+// the request url without the {}"), NOT the JSON body.
+export function inbodyDataUrl(apiUrl, usertoken, datetimes) {
+  const base = apiUrl.replace(/\/+$/, '')
+  return `${base}/inbody/GetFullInBodyData/${encodeURIComponent(usertoken)}/${encodeURIComponent(datetimes)}`
+}
+
+// Never throws — returns { ok, statusCode, body }. Reads the response as text
+// first so non-JSON error bodies (e.g. "Empty Parameter") are still captured.
 export async function fetchFullInBodyData({ apiUrl, apiKey, account, usertoken, datetimes }) {
-  const url = `${apiUrl.replace(/\/+$/, '')}/inbody/GetFullInBodyData`
+  const url = inbodyDataUrl(apiUrl, usertoken, datetimes)
   try {
     const res = await request(url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'API-KEY': apiKey, 'Account': account },
-      body: JSON.stringify({ usertoken, datetimes }),
+      headers: { 'API-KEY': apiKey, 'Account': account },
       bodyTimeout: 15_000,
       headersTimeout: 15_000,
     })
+    const text = await res.body.text()
     let body = null
-    try { body = await res.body.json() } catch { /* non-JSON / empty */ }
+    try { body = text ? JSON.parse(text) : null } catch { body = text }
     return { ok: res.statusCode < 400, statusCode: res.statusCode, body }
   } catch (err) {
     logWarn('inbody', 'GetFullInBodyData network error', { err })
@@ -82,7 +91,7 @@ export async function runInbodyCycle(state, deps = {}) {
     if (r.ok && r.body) {
       results.push({ event_id: p.event_id, raw: r.body })
     } else {
-      logWarn('inbody', 'fetch failed', { statusCode: r.statusCode, event_id: p.event_id })
+      logWarn('inbody', 'fetch failed', { statusCode: r.statusCode, event_id: p.event_id, body: r.body })
       // 401 = IP not whitelisted, subscription lapsed, or call cap hit.
       // No point hammering the rest of the batch — stop and retry next cycle.
       if (r.statusCode === 401) break
