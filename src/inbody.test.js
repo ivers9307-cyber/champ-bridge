@@ -9,6 +9,7 @@ process.env.CHAMP_API_URL = process.env.CHAMP_API_URL || 'http://localhost:3000'
 const {
   withinDailyCap, utcDateKey, runInbodyCycle, inbodyDataUrl,
   inbodyDatetimesUrl, extractInbodyDatetimes, runInbodyBackfillCycle,
+  inbodyUsertokenCandidates,
 } = await import('./inbody.js')
 
 const okIngest = vi.fn(async (results) => ({ ok: true, body: { processed: results.length, linked: 0 } }))
@@ -71,6 +72,21 @@ describe('extractInbodyDatetimes', () => {
   })
 })
 
+describe('inbodyUsertokenCandidates', () => {
+  it('tries the IE local 0-format first for a +353 E.164 number', () => {
+    expect(inbodyUsertokenCandidates('+353873147675'))
+      .toEqual(['0873147675', '353873147675', '+353873147675', '873147675'])
+  })
+  it('handles a bare local number and de-dupes', () => {
+    expect(inbodyUsertokenCandidates('0873147675'))
+      .toEqual(['0873147675', '873147675'])
+  })
+  it('returns [] for junk', () => {
+    expect(inbodyUsertokenCandidates('')).toEqual([])
+    expect(inbodyUsertokenCandidates(null)).toEqual([])
+  })
+})
+
 describe('runInbodyBackfillCycle', () => {
   const base = (over) => ({
     today: '2024-01-01', apiUrl: 'x', apiKey: 'k', account: 'a', cap: 450,
@@ -80,25 +96,56 @@ describe('runInbodyBackfillCycle', () => {
     fetcher: vi.fn(async () => ({ ok: true, statusCode: 200, body: { Weight: 80 } })),
     ...over,
   })
+  const onePending = (phone) => vi.fn(async () => ({ ok: true, body: { pending: [{ request_id: 'r1', phone }] } }))
 
-  it('GetDateTimes → GetFullInBodyData per scan → relays them', async () => {
-    const getBackfillPending = vi.fn(async () => ({ ok: true, body: { pending: [{ request_id: 'r1', phone: '353871' }] } }))
+  it('matches the local 0-format, pulls each scan with it, relays with the matched usertoken', async () => {
+    const getBackfillPending = onePending('+353873147675')
     const datetimesFetcher = vi.fn(async () => ({ ok: true, statusCode: 200, body: ['20240101120000', '20240202130000'] }))
     const fetcher = vi.fn(async () => ({ ok: true, statusCode: 200, body: { Weight: 80 } }))
     const postBackfillIngest = vi.fn(async () => ({ ok: true, body: { ingested: 2 } }))
     const state = { day: null, sent: 0 }
     const out = await runInbodyBackfillCycle(state, base({ getBackfillPending, datetimesFetcher, fetcher, postBackfillIngest }))
     expect(out).toEqual({ requests: 1, ingested: 2 })
-    expect(fetcher).toHaveBeenCalledTimes(2)
-    expect(postBackfillIngest).toHaveBeenCalledWith({ request_id: 'r1', scans: [
+    // first candidate (0+last9) returned data → only one GetDateTimes call
+    expect(datetimesFetcher).toHaveBeenCalledTimes(1)
+    expect(datetimesFetcher.mock.calls[0][0].usertoken).toBe('0873147675')
+    // scans fetched with the matched usertoken
+    expect(fetcher.mock.calls[0][0].usertoken).toBe('0873147675')
+    expect(postBackfillIngest).toHaveBeenCalledWith({ request_id: 'r1', usertoken: '0873147675', scans: [
       { datetimes: '20240101120000', raw: { Weight: 80 } },
       { datetimes: '20240202130000', raw: { Weight: 80 } },
     ] })
     expect(state.sent).toBe(3) // 1 GetDateTimes + 2 GetFullInBodyData
   })
 
-  it('reports an error (and never fetches scans) when GetDateTimes fails', async () => {
-    const getBackfillPending = vi.fn(async () => ({ ok: true, body: { pending: [{ request_id: 'r1', phone: 'x' }] } }))
+  it('falls through to the next candidate when the first returns no scans', async () => {
+    const getBackfillPending = onePending('+353873147675')
+    // empty for 0873147675, data for the next candidate (353873147675)
+    const datetimesFetcher = vi.fn(async ({ usertoken }) =>
+      usertoken === '353873147675'
+        ? ({ ok: true, statusCode: 200, body: ['20240101120000'] })
+        : ({ ok: true, statusCode: 200, body: [] }))
+    const fetcher = vi.fn(async () => ({ ok: true, statusCode: 200, body: { Weight: 80 } }))
+    const postBackfillIngest = vi.fn(async () => ({ ok: true, body: { ingested: 1 } }))
+    const out = await runInbodyBackfillCycle({ day: null, sent: 0 }, base({ getBackfillPending, datetimesFetcher, fetcher, postBackfillIngest }))
+    expect(out).toEqual({ requests: 1, ingested: 1 })
+    expect(datetimesFetcher).toHaveBeenCalledTimes(2) // tried 0…, then 353…
+    expect(postBackfillIngest.mock.calls[0][0].usertoken).toBe('353873147675')
+  })
+
+  it('closes the request done-with-0 when no format returns scans', async () => {
+    const getBackfillPending = onePending('+353873147675')
+    const datetimesFetcher = vi.fn(async () => ({ ok: true, statusCode: 200, body: [] }))
+    const fetcher = vi.fn()
+    const postBackfillIngest = vi.fn(async () => ({ ok: true, body: { ingested: 0 } }))
+    const out = await runInbodyBackfillCycle({ day: null, sent: 0 }, base({ getBackfillPending, datetimesFetcher, fetcher, postBackfillIngest }))
+    expect(fetcher).not.toHaveBeenCalled()
+    expect(postBackfillIngest).toHaveBeenCalledWith({ request_id: 'r1', usertoken: null, scans: [] })
+    expect(out.requests).toBe(1)
+  })
+
+  it('reports an error (and never fetches scans) on a GetDateTimes 401', async () => {
+    const getBackfillPending = onePending('+353873147675')
     const datetimesFetcher = vi.fn(async () => ({ ok: false, statusCode: 401, body: 'no' }))
     const fetcher = vi.fn()
     const postBackfillIngest = vi.fn(async () => ({ ok: true, body: {} }))
