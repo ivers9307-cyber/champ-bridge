@@ -13,9 +13,30 @@
 import { config } from './config.js'
 import { logInfo, logWarn, logError } from './log.js'
 import { createStrapSource } from './strap-source.js'
-import { pushSample, startFlushLoop, pendingCount } from './buffer.js'
+import { pushSample, startFlushLoop, pendingCount, flushSamples } from './buffer.js'
 import { postHeartbeat, postScan } from './api.js'
 import { runInbodyCycle, runInbodyBackfillCycle } from './inbody.js'
+
+// Crash safety net. Without these an uncaught exception / unhandled
+// rejection tears the process down immediately and silently — the
+// in-memory sample buffer is lost with no journal breadcrumb. We log
+// structured, attempt one last flush so buffered samples aren't lost,
+// then exit non-zero so systemd restarts cleanly.
+let crashing = false
+async function fatalExit(kind, err) {
+  if (crashing) return
+  crashing = true
+  logError('bridge', `fatal: ${kind}`, { err })
+  try {
+    await Promise.race([
+      flushSamples(),
+      new Promise((r) => setTimeout(r, 5_000)),
+    ])
+  } catch { /* best-effort final flush */ }
+  process.exit(1)
+}
+process.on('uncaughtException', (err) => { fatalExit('uncaughtException', err) })
+process.on('unhandledRejection', (reason) => { fatalExit('unhandledRejection', reason) })
 
 async function main() {
   logInfo('bridge', 'champ-bridge starting', {
@@ -95,15 +116,25 @@ async function main() {
 
   // Graceful shutdown. systemd sends SIGTERM on stop; we want to
   // disconnect from straps cleanly before exiting so the next start
-  // doesn't hit lingering connections.
+  // doesn't hit lingering connections. A once-guard stops a double
+  // signal (e.g. SIGINT then SIGTERM) running shutdown twice.
+  let shuttingDown = false
   async function shutdown(signal) {
+    if (shuttingDown) return
+    shuttingDown = true
     logInfo('bridge', `received ${signal}, shutting down`)
     clearInterval(flushTimer)
     clearInterval(scanTimer)
     clearInterval(heartbeatTimer)
     if (inbodyTimer) clearInterval(inbodyTimer)
     await straps.stop().catch(() => {})
-    await postHeartbeat({ status: 'error' }).catch(() => {})
+    // Drain the buffer one last time so a clean restart/deploy doesn't
+    // drop the samples collected since the last flush tick.
+    await flushSamples().catch(() => {})
+    // A clean stop is 'offline', NOT 'error' — every deploy/restart used
+    // to post status:'error' and spam monitoring. 'error' now means a
+    // real crash (via fatalExit), which keeps the signal meaningful.
+    await postHeartbeat({ status: 'offline' }).catch(() => {})
     process.exit(0)
   }
   process.on('SIGTERM', () => shutdown('SIGTERM'))

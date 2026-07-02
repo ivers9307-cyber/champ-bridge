@@ -31,11 +31,21 @@ import { EventEmitter } from 'node:events'
 import { config } from './config.js'
 import { logInfo, logWarn, logDebug } from './log.js'
 import { makeDeviceKey } from './device-key.js'
+import { shouldForwardSample, clampBpm } from './decimate.js'
 
 // HR straps broadcast ~4 Hz. If we've heard nothing for this long the
 // strap has left the room.
 const ANT_STALE_MS = 15_000
 const STALE_SWEEP_MS = 5_000
+
+// No stick at boot (USB enumeration race after a power cut) must not
+// kill ANT+ for the whole run — retry the open this often until one
+// appears. Same backoff used to re-open after a runtime stick error.
+const ANT_OPEN_RETRY_MS = 30_000
+
+// Wait this long for a stick's 'startup' event before treating the
+// open as failed and trying the next stick class.
+const ANT_STARTUP_TIMEOUT_MS = 3_000
 
 class FakeAnt extends EventEmitter {
   constructor() {
@@ -89,46 +99,97 @@ class FakeAnt extends EventEmitter {
 class RealAnt extends EventEmitter {
   constructor() {
     super()
-    this.seen = new Map() // device_key → { lastBpm, rssi, lastSeenMs }
+    // device_key → { lastBpm, rssi, lastSeenMs, lastForwardedMs }
+    this.seen = new Map()
+    this._stopped = false
   }
 
   async start() {
     // Lazy import — ant-plus-next pulls the native `usb` binding on
     // require, which isn't present on dev machines.
     const antPlus = await import('ant-plus-next')
-    const { GarminStick3, GarminStick2, HeartRateScanner } = antPlus.default || antPlus
+    this._stickClasses = antPlus.default || antPlus
+    // Kick off the open/scan sequence with a retry loop so a missing
+    // stick at boot (USB enumeration race after a power cut) doesn't
+    // disable ANT+ for the whole run.
+    await this._openAndScan()
+  }
+
+  // Try to open a stick + start scanning. If none is present, schedule
+  // a retry. Also (re)used to recover after a runtime stick error.
+  async _openAndScan() {
+    if (this._stopped) return
+    const { GarminStick3, GarminStick2, HeartRateScanner } = this._stickClasses
 
     // The ANT+ USB-m stick enumerates as a GarminStick3; the older
     // ANTUSB2 as a GarminStick2. Try the modern one first, fall back.
     const stick = await openAnyStick([GarminStick3, GarminStick2])
     if (!stick) {
-      logWarn('ant', 'no ANT+ USB stick found — ANT+ disabled for this run')
+      logWarn('ant', `no ANT+ USB stick found — retrying in ${ANT_OPEN_RETRY_MS}ms`)
+      this._scheduleReopen()
+      return
+    }
+    if (this._stopped) {
+      // Raced with stop() — close what we just opened.
+      if (typeof stick.close === 'function') await Promise.resolve(stick.close()).catch(() => {})
       return
     }
     this._stick = stick
 
+    // A runtime 'error' on the stick/scanner is currently unhandled and
+    // kills the process. Attach listeners that tear down and re-run the
+    // whole open/scan sequence so a USB blip self-heals.
+    const onStickError = (err) => {
+      logWarn('ant', 'ANT+ stick error — tearing down and reopening', { err })
+      this._teardownAndReopen()
+    }
+    const onStickShutdown = () => {
+      logWarn('ant', 'ANT+ stick shutdown — tearing down and reopening')
+      this._teardownAndReopen()
+    }
+    this._onStickError = onStickError
+    this._onStickShutdown = onStickShutdown
+    if (typeof stick.on === 'function') {
+      stick.on('error', onStickError)
+      stick.on('shutdown', onStickShutdown)
+    }
+
     const scanner = new HeartRateScanner(stick)
     this._scanner = scanner
+    if (typeof scanner.on === 'function') {
+      scanner.on('error', onStickError)
+    }
 
     // heartRateData fires once per heartbeat page, for EVERY strap in
     // range. (ant-plus-next renamed this from the classic `hbData`.)
     scanner.on('heartRateData', (data) => {
       const antId = data?.DeviceId ?? data?.DeviceID
-      const bpm = Number(data?.ComputedHeartRate)
       const key = makeDeviceKey('ant', antId)
-      if (!key || !Number.isFinite(bpm) || bpm <= 0) return
+      // Clamp to a sane upper bound (a byte-decode glitch can surface an
+      // implausible value); clampBpm returns null for <=0 / non-finite.
+      const bpm = clampBpm(Number(data?.ComputedHeartRate))
+      if (!key || bpm == null) return
 
+      const now = Date.now()
       const rssi = Number.isFinite(data?.Rssi) ? data.Rssi : null
       const known = this.seen.get(key)
       if (!known) {
-        this.seen.set(key, { lastBpm: bpm, rssi, lastSeenMs: Date.now() })
+        // First sight always forwards (lastForwardedMs = now).
+        this.seen.set(key, { lastBpm: bpm, rssi, lastSeenMs: now, lastForwardedMs: now })
         this.emit('strap-seen', { device_key: key, name: null, rssi, last_bpm: bpm })
+        this.emit('strap-sample', { device_key: key, recorded_at: new Date().toISOString(), bpm })
         logDebug('ant', 'strap detected', { device_key: key, bpm })
-      } else {
-        known.lastBpm = bpm
-        known.rssi = rssi
-        known.lastSeenMs = Date.now()
+        return
       }
+
+      known.lastBpm = bpm
+      known.rssi = rssi
+      known.lastSeenMs = now
+      // Decimate ANT+'s ~4 Hz down to ~1 Hz per device: keep the latest
+      // sample per device per second, drop the rest. (Pure decision in
+      // decimate.js.) Still tracks lastBpm/lastSeenMs for scan + stale.
+      if (!shouldForwardSample(now, known.lastForwardedMs)) return
+      known.lastForwardedMs = now
       this.emit('strap-sample', {
         device_key: key,
         recorded_at: new Date().toISOString(),
@@ -141,30 +202,63 @@ class RealAnt extends EventEmitter {
     logInfo('ant', 'ANT+ scanner running')
 
     // ANT+ has no disconnect event — sweep for silent straps.
-    this._sweep = setInterval(() => {
-      const cutoff = Date.now() - ANT_STALE_MS
-      for (const [key, s] of this.seen.entries()) {
-        if (s.lastSeenMs < cutoff) {
-          this.seen.delete(key)
-          this.emit('strap-lost', key)
-          logInfo('ant', 'strap silent — dropped', { device_key: key })
+    if (!this._sweep) {
+      this._sweep = setInterval(() => {
+        const cutoff = Date.now() - ANT_STALE_MS
+        for (const [key, s] of this.seen.entries()) {
+          if (s.lastSeenMs < cutoff) {
+            this.seen.delete(key)
+            this.emit('strap-lost', key)
+            logInfo('ant', 'strap silent — dropped', { device_key: key })
+          }
         }
-      }
-    }, STALE_SWEEP_MS)
+      }, STALE_SWEEP_MS)
+    }
   }
 
-  async stop() {
-    if (this._sweep) clearInterval(this._sweep)
+  _scheduleReopen() {
+    if (this._stopped || this._reopenTimer) return
+    this._reopenTimer = setTimeout(() => {
+      this._reopenTimer = null
+      this._openAndScan().catch((err) => logWarn('ant', 'reopen failed', { err }))
+    }, ANT_OPEN_RETRY_MS)
+    if (typeof this._reopenTimer.unref === 'function') this._reopenTimer.unref()
+  }
+
+  // Close the current stick/scanner (best-effort) then schedule a fresh
+  // open. Used by the error/shutdown listeners.
+  async _teardownAndReopen() {
+    await this._closeStick()
+    this._scheduleReopen()
+  }
+
+  async _closeStick() {
     try {
-      if (this._scanner && typeof this._scanner.detach === 'function') {
-        await Promise.resolve(this._scanner.detach())
+      if (this._scanner) {
+        if (this._onStickError && typeof this._scanner.removeListener === 'function') {
+          this._scanner.removeListener('error', this._onStickError)
+        }
+        if (typeof this._scanner.detach === 'function') await Promise.resolve(this._scanner.detach())
       }
-      if (this._stick && typeof this._stick.close === 'function') {
-        await Promise.resolve(this._stick.close())
+      if (this._stick) {
+        if (typeof this._stick.removeListener === 'function') {
+          if (this._onStickError) this._stick.removeListener('error', this._onStickError)
+          if (this._onStickShutdown) this._stick.removeListener('shutdown', this._onStickShutdown)
+        }
+        if (typeof this._stick.close === 'function') await Promise.resolve(this._stick.close())
       }
     } catch (e) {
       logWarn('ant', 'error closing ANT+ stick', { err: e })
     }
+    this._scanner = null
+    this._stick = null
+  }
+
+  async stop() {
+    this._stopped = true
+    if (this._reopenTimer) { clearTimeout(this._reopenTimer); this._reopenTimer = null }
+    if (this._sweep) { clearInterval(this._sweep); this._sweep = null }
+    await this._closeStick()
     this.seen.clear()
   }
 
@@ -176,29 +270,42 @@ class RealAnt extends EventEmitter {
 }
 
 /**
- * Try each stick class in turn; return the first that opens, or null.
- * `open()` is boolean-returning in ant-plus(-next) and emits
- * 'startup' once the stick is ready.
+ * Try each stick class in turn; return the first that opens AND fires
+ * 'startup', or null. `open()` is boolean-returning in ant-plus(-next)
+ * and emits 'startup' once the stick is actually ready.
+ *
+ * A stick that opens but never fires 'startup' is NOT usable — the old
+ * code resolved that timeout as success (returning a dead stick) and
+ * leaked the setTimeout. Now a timeout is a failure: close the stick,
+ * clear the timer, and fall through to the next class.
  */
 async function openAnyStick(stickClasses) {
   for (const StickClass of stickClasses) {
     if (typeof StickClass !== 'function') continue
+    let stick
     try {
-      const stick = new StickClass()
+      stick = new StickClass()
       const opened = await Promise.resolve(stick.open())
-      if (opened) {
-        await new Promise((resolve) => {
-          let done = false
-          const finish = () => { if (!done) { done = true; resolve() } }
-          stick.once('startup', finish)
-          // Don't hang forever if 'startup' never fires.
-          setTimeout(finish, 3000)
-        })
-        return stick
+      if (!opened) {
+        if (typeof stick.close === 'function') await Promise.resolve(stick.close()).catch(() => {})
+        continue
       }
+      const started = await new Promise((resolve) => {
+        let timer
+        const finish = (ok) => {
+          clearTimeout(timer)
+          resolve(ok)
+        }
+        stick.once('startup', () => finish(true))
+        // 'startup' never fired within the budget → treat as failure.
+        timer = setTimeout(() => finish(false), ANT_STARTUP_TIMEOUT_MS)
+      })
+      if (started) return stick
+      logWarn('ant', `${StickClass.name} opened but never signalled startup — skipping`)
       if (typeof stick.close === 'function') await Promise.resolve(stick.close()).catch(() => {})
     } catch (e) {
       logWarn('ant', `${StickClass.name} open failed`, { err: e })
+      if (stick && typeof stick.close === 'function') await Promise.resolve(stick.close()).catch(() => {})
     }
   }
   return null

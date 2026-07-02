@@ -78,3 +78,43 @@ describe('overflow', () => {
     expect(pendingCount()).toBe(5000)
   })
 })
+
+describe('in-flight guard (concurrent flush prevention)', () => {
+  it('a second flush while the first is in-flight no-ops and does not double-send', async () => {
+    // beforeEach may have drained a leftover buffer; reset call count so
+    // we count only this test's posts.
+    postSamples.mockClear()
+    // Make postSamples hang until we release it — simulates a slow API.
+    let release
+    const gate = new Promise((r) => { release = r })
+    postSamples.mockImplementation(async () => { await gate; return { ok: true } })
+
+    for (let i = 0; i < 10; i++) {
+      pushSample({ device_key: 'ant:12345', recorded_at: new Date().toISOString(), bpm: 120 })
+    }
+
+    // Start flush #1 (parks on the gate mid-post).
+    const first = flushSamples()
+    // Flush #2 fires from the next interval tick while #1 is in-flight.
+    const second = await flushSamples()
+    // #2 must have skipped — NOT started a concurrent post of the same snapshot.
+    expect(second).toEqual({ sent: 0, skipped: true })
+
+    release()
+    const firstResult = await first
+    expect(firstResult.sent).toBe(10)
+    // Exactly one network post for the 10 samples — no double-send.
+    expect(postSamples).toHaveBeenCalledTimes(1)
+    expect(pendingCount()).toBe(0)
+  })
+
+  it('flushing flag clears after completion so the next tick can flush', async () => {
+    postSamples.mockResolvedValue({ ok: true })
+    pushSample({ device_key: 'ant:12345', recorded_at: new Date().toISOString(), bpm: 120 })
+    await flushSamples()
+    // Second, sequential flush works normally (guard reset in finally).
+    pushSample({ device_key: 'ant:12345', recorded_at: new Date().toISOString(), bpm: 121 })
+    const out = await flushSamples()
+    expect(out.sent).toBe(1)
+  })
+})

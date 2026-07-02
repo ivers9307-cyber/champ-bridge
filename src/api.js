@@ -6,12 +6,41 @@
 
 import { request } from 'undici'
 import { config } from './config.js'
-import { logWarn, logDebug } from './log.js'
+import { logWarn, logDebug, logError } from './log.js'
+import { nextAuthFailureState, MAX_CONSECUTIVE_AUTH_FAILURES } from './auth-failure.js'
 
 const COMMON_HEADERS = {
   'authorization': `Bearer ${config.token}`,
   'content-type': 'application/json',
   'user-agent': `champ-bridge/${config.softwareVersion}`,
+}
+
+// Consecutive-auth-failure tracking. A dead/revoked token 401s (or
+// 403s) forever; the old client warn-looped as a silent zombie. After
+// MAX_CONSECUTIVE_AUTH_FAILURES in a row we exit non-zero so systemd
+// restarts and the journal shows why. Any success / network error /
+// non-auth response resets the streak (see auth-failure.js), so a
+// normal rotation (paired with the CRM-side dual-token grace window)
+// won't trip it — only a genuinely dead token does.
+let authFailures = 0
+
+// Overridable so the exit path is testable without killing the runner.
+let onAuthZombie = () => {
+  logError('api', `${MAX_CONSECUTIVE_AUTH_FAILURES} consecutive auth failures — token appears dead; exiting for systemd restart`)
+  process.exit(1)
+}
+
+/** Test seam: swap the exit behaviour + reset the counter. */
+export function __setAuthZombieHandler(fn) {
+  onAuthZombie = fn
+  authFailures = 0
+}
+
+/** Fold one request outcome into the auth-failure counter; act if dead. */
+function trackAuth(outcome) {
+  const { count, exit } = nextAuthFailureState(authFailures, outcome)
+  authFailures = count
+  if (exit) onAuthZombie()
 }
 
 async function postJson(path, body) {
@@ -30,12 +59,15 @@ async function postJson(path, body) {
     try { parsed = await res.body.json() } catch { /* response without body */ }
     if (res.statusCode >= 400) {
       logWarn('api', `${path} returned ${res.statusCode}`, { body: parsed })
+      trackAuth({ statusCode: res.statusCode })
       return { ok: false, statusCode: res.statusCode, body: parsed }
     }
     logDebug('api', `${path} ok`, { body: parsed })
+    trackAuth({ statusCode: res.statusCode })
     return { ok: true, statusCode: res.statusCode, body: parsed }
   } catch (err) {
     logWarn('api', `${path} network error`, { err })
+    trackAuth({ networkError: true })
     return { ok: false, networkError: true, err }
   }
 }
@@ -53,12 +85,15 @@ async function getJson(path) {
     try { parsed = await res.body.json() } catch { /* response without body */ }
     if (res.statusCode >= 400) {
       logWarn('api', `${path} returned ${res.statusCode}`, { body: parsed })
+      trackAuth({ statusCode: res.statusCode })
       return { ok: false, statusCode: res.statusCode, body: parsed }
     }
     logDebug('api', `${path} ok`, { body: parsed })
+    trackAuth({ statusCode: res.statusCode })
     return { ok: true, statusCode: res.statusCode, body: parsed }
   } catch (err) {
     logWarn('api', `${path} network error`, { err })
+    trackAuth({ networkError: true })
     return { ok: false, networkError: true, err }
   }
 }

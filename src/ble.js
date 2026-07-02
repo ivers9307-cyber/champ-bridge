@@ -29,9 +29,14 @@ import { EventEmitter } from 'node:events'
 import { config } from './config.js'
 import { logInfo, logWarn, logDebug } from './log.js'
 import { canonicaliseMac, makeDeviceKey } from './device-key.js'
+import { parseHeartRateMeasurement } from './hrm.js'
 
 const HEART_RATE_SERVICE = '180d'
 const HEART_RATE_MEASUREMENT_CHAR = '2a37'
+
+// A connectAsync() that never resolves parks a peripheral forever,
+// holding a maxConnections slot as a ghost. Cap the attempt.
+const CONNECT_TIMEOUT_MS = 15_000
 
 class FakeBle extends EventEmitter {
   constructor() {
@@ -96,73 +101,114 @@ class RealBle extends EventEmitter {
     noble.on('stateChange', async (state) => {
       logInfo('ble', `noble state ${state}`)
       if (state === 'poweredOn') {
-        try {
-          await noble.startScanningAsync([HEART_RATE_SERVICE], false)
-          logInfo('ble', 'scanning for heart rate service')
-        } catch (e) {
-          logWarn('ble', 'startScanning failed', { err: e })
-        }
+        this._poweredOn = true
+        await this._startScanning()
       } else {
+        this._poweredOn = false
         await noble.stopScanningAsync().catch(() => {})
       }
     })
 
-    noble.on('discover', async (peripheral) => {
-      const mac = canonicaliseMac(peripheral.address || peripheral.id)
-      const key = makeDeviceKey('ble', mac)
-      if (!key || this.connected.size >= config.maxConnections) return
-      if (this.connected.has(key)) return
-
-      const name = peripheral.advertisement?.localName || null
-      const rssi = peripheral.rssi || null
-      this.connected.set(key, { peripheral, name, rssi, lastBpm: null })
-      this.emit('strap-seen', { device_key: key, name, rssi })
-      logDebug('ble', 'discovered', { device_key: key, name, rssi })
-
-      try {
-        await peripheral.connectAsync()
-        const { characteristics } = await peripheral.discoverSomeServicesAndCharacteristicsAsync(
-          [HEART_RATE_SERVICE],
-          [HEART_RATE_MEASUREMENT_CHAR],
-        )
-        const hrChar = characteristics[0]
-        if (!hrChar) {
-          logWarn('ble', 'no HR characteristic found', { device_key: key })
-          await peripheral.disconnectAsync().catch(() => {})
-          this.connected.delete(key)
-          return
-        }
-
-        hrChar.on('data', (data) => {
-          // Heart Rate Measurement format (BLE GATT spec):
-          //   byte 0: flags. bit 0 = 0 → bpm in byte 1 (8-bit);
-          //                  bit 0 = 1 → bpm in bytes 1-2 (16-bit LE).
-          if (!data || data.length < 2) return
-          const flags = data[0]
-          const wide = (flags & 0x01) === 1
-          const bpm = wide ? data.readUInt16LE(1) : data[1]
-          const state = this.connected.get(key)
-          if (state) state.lastBpm = bpm
-          this.emit('strap-sample', {
-            device_key: key,
-            recorded_at: new Date().toISOString(),
-            bpm,
-          })
-        })
-
-        await hrChar.subscribeAsync()
-        peripheral.once('disconnect', () => {
-          this.connected.delete(key)
-          this.emit('strap-lost', key)
-          logInfo('ble', 'disconnect', { device_key: key })
-        })
-      } catch (e) {
-        logWarn('ble', 'connect failed', { err: e, device_key: key })
-        this.connected.delete(key)
-      }
-    })
+    noble.on('discover', (peripheral) => this._onDiscover(peripheral))
 
     this._noble = noble
+  }
+
+  // Scan with allowDuplicates=TRUE so a strap that dropped mid-class
+  // keeps re-advertising and gets picked up again — with dedup gated on
+  // the `connected` map below, not on noble's one-shot discovery. With
+  // allowDuplicates=false a disconnected strap would never re-surface
+  // and the member's session would end for the rest of class.
+  async _startScanning() {
+    if (!this._noble || !this._poweredOn) return
+    try {
+      await this._noble.startScanningAsync([HEART_RATE_SERVICE], true)
+      logInfo('ble', 'scanning for heart rate service')
+    } catch (e) {
+      logWarn('ble', 'startScanning failed', { err: e })
+    }
+  }
+
+  async _onDiscover(peripheral) {
+    const mac = canonicaliseMac(peripheral.address || peripheral.id)
+    const key = makeDeviceKey('ble', mac)
+    if (!key) return
+    // Dedup: already connected/connecting to this strap → ignore the
+    // duplicate advertising packet. This is what lets allowDuplicates
+    // be true without re-connecting an in-session strap every packet.
+    if (this.connected.has(key)) return
+    if (this.connected.size >= config.maxConnections) return
+
+    const name = peripheral.advertisement?.localName || null
+    const rssi = peripheral.rssi || null
+    // Claim the slot up front so concurrent discover packets dedup.
+    this.connected.set(key, { peripheral, name, rssi, lastBpm: null })
+    this.emit('strap-seen', { device_key: key, name, rssi })
+    logDebug('ble', 'discovered', { device_key: key, name, rssi })
+
+    try {
+      // connectAsync can hang forever (holding a maxConnections slot as
+      // a ghost). Race it against a timeout and treat a timeout as a
+      // failed connect → clean up the slot.
+      await this._withTimeout(
+        peripheral.connectAsync(),
+        CONNECT_TIMEOUT_MS,
+        `connect ${key}`,
+      )
+      const { characteristics } = await peripheral.discoverSomeServicesAndCharacteristicsAsync(
+        [HEART_RATE_SERVICE],
+        [HEART_RATE_MEASUREMENT_CHAR],
+      )
+      const hrChar = characteristics[0]
+      if (!hrChar) {
+        logWarn('ble', 'no HR characteristic found', { device_key: key })
+        await peripheral.disconnectAsync().catch(() => {})
+        this.connected.delete(key)
+        return
+      }
+
+      hrChar.on('data', (data) => {
+        // Parse via the pure HRM parser (hrm.js): guards the wide-flag
+        // short-packet RangeError that would otherwise be thrown inside
+        // noble's synchronous 'data' emit → uncaught → process death.
+        // It also drops bpm<=0, off-body, and out-of-range readings.
+        const parsed = parseHeartRateMeasurement(data)
+        if (!parsed) return
+        const state = this.connected.get(key)
+        if (state) state.lastBpm = parsed.bpm
+        this.emit('strap-sample', {
+          device_key: key,
+          recorded_at: new Date().toISOString(),
+          bpm: parsed.bpm,
+        })
+      })
+
+      await hrChar.subscribeAsync()
+      peripheral.once('disconnect', () => {
+        this.connected.delete(key)
+        this.emit('strap-lost', key)
+        logInfo('ble', 'disconnect', { device_key: key })
+        // Force re-discovery so a sweaty-gym mid-class drop doesn't end
+        // the session: restart scanning (allowDuplicates flushes noble's
+        // seen-cache so the strap re-advertises and we reconnect).
+        this._startScanning().catch(() => {})
+      })
+    } catch (e) {
+      logWarn('ble', 'connect failed', { err: e, device_key: key })
+      // Ensure we don't leak a half-open GATT connection into a ghost slot.
+      await peripheral.disconnectAsync().catch(() => {})
+      this.connected.delete(key)
+    }
+  }
+
+  // Resolve the promise, or reject once ms elapses. On timeout we log
+  // and the caller's catch cleans up (disconnect + free the slot).
+  _withTimeout(promise, ms, label) {
+    let timer
+    const timeout = new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`timeout: ${label} (${ms}ms)`)), ms)
+    })
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
   }
 
   async stop() {
