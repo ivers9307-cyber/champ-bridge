@@ -58,14 +58,19 @@ when connectivity returns. Replays are idempotent server-side (PK on
    sudo setcap cap_net_raw+eip $(eval readlink -f $(which node))
    ```
 4. **Grant ANT+ USB access without root** — add a udev rule so the
-   service user can open the stick:
+   service user can open the stick. Grant it to the `plugdev` group
+   (user `pi` is already a member) rather than world-writable `0666`:
    ```sh
-   echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="0fcf", MODE="0666"' \
+   echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="0fcf", MODE="0660", GROUP="plugdev"' \
      | sudo tee /etc/udev/rules.d/99-garmin-ant.rules
    sudo udevadm control --reload-rules && sudo udevadm trigger
    ```
    `0fcf` is the Dynastream/Garmin vendor ID — covers both stick
-   generations.
+   generations. `0660`+`plugdev` means only members of `plugdev` (the
+   service user) can open the stick — not every process on the box.
+   If the service runs as a user NOT in `plugdev`, either add it
+   (`sudo usermod -aG plugdev <user>`) or set `GROUP=` to that user's
+   group.
 5. **Clone + install**:
    ```sh
    git clone https://github.com/ivers9307-cyber/champ-bridge.git
@@ -75,10 +80,15 @@ when connectivity returns. Replays are idempotent server-side (PK on
 6. **Get a token from the CRM** — master logs in to crm.un1tdublin.com,
    POST `/api/admin/bridges` with name + location_id + hardware_id.
    Response includes the raw token (shown once).
-7. **Create `.env`**:
+7. **Create `.env`** and lock it down. It holds the bearer token and
+   (if enabled) the InBody API key; a default `755` home leaves it
+   world-readable, so restrict it to the owner:
    ```
    CHAMP_BRIDGE_TOKEN=bbr_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
    CHAMP_API_URL=https://crm.un1tdublin.com
+   ```
+   ```sh
+   chmod 600 .env
    ```
 8. **Smoke test**:
    ```sh
@@ -108,11 +118,18 @@ end-to-end without a Pi.
 | `FAKE_STRAPS` | off | synthetic straps for dev (`FAKE_BLE` still works as an alias) |
 | `ENABLE_ANT` | on | set `0` to disable the ANT+ adapter |
 | `ENABLE_BLE` | on | set `0` to disable the BLE adapter |
-| `BATCH_INTERVAL_MS` | 3000 | sample flush cadence |
-| `SCAN_INTERVAL_MS` | 5000 | `/scan` post cadence |
-| `HEARTBEAT_MS` | 30000 | idle heartbeat cadence |
+| `BATCH_INTERVAL_MS` | 3000 | sample flush cadence (clamped ≥ 500ms) |
+| `SCAN_INTERVAL_MS` | 5000 | `/scan` post cadence (clamped ≥ 1000ms) |
+| `HEARTBEAT_MS` | 30000 | idle heartbeat cadence (clamped ≥ 5000ms) |
 | `MAX_CONNECTIONS` | 30 | soft cap on concurrent BLE connections (ANT+ has none) |
 | `LOG_LEVEL` | info | debug / info / warn / error |
+| `INBODY_STATE_FILE` | `inbody-daily-count.json` | where the InBody daily-cap counter persists (point at a `StateDirectory` if the working dir is read-only) |
+
+Interval envs are clamped to a sane minimum so a fat-fingered or
+negative value can't turn a poll loop into a busy-spin. `CHAMP_API_URL`
+is URL-validated at startup and the token is shape-checked (`bbr_`
+prefix) — a mis-paste warns in the journal instead of 401-looping
+silently.
 
 ## Deploy
 
@@ -130,6 +147,54 @@ Logs:
 ```sh
 sudo journalctl -u champ-bridge -f
 ```
+
+### One-time Pi ops setup
+
+The Pi has no real-time clock and defaults to RAM-only logs, so do
+these once per Pi (all detailed in `deploy/champ-bridge.service`):
+
+- **Block boot on a synced clock** — without an RTC, a power-cut Pi
+  can start with a wildly wrong clock and stamp `recorded_at` with
+  garbage. The unit orders `After=time-sync.target`; make that a real
+  guarantee by enabling the wait unit:
+  ```sh
+  sudo systemctl enable systemd-time-wait-sync.service
+  ```
+- **Persistent, capped journald** — so the logs you need after a
+  power cut survive the reboot (and don't chew the SD card):
+  ```sh
+  sudo mkdir -p /var/log/journal
+  sudo systemd-tmpfiles --create --prefix /var/log/journal
+  # /etc/systemd/journald.conf:  Storage=persistent   SystemMaxUse=200M
+  sudo systemctl restart systemd-journald
+  ```
+- **systemd watchdog (optional, after on-Pi verification)** — the
+  sd_notify plumbing is wired (`READY=1` + periodic `WATCHDOG=1`), but
+  the unit ships `Type=simple`. To arm it: flip to `Type=notify` and
+  uncomment `WatchdogSec` + `NotifyAccess=all` in the unit, then
+  `daemon-reload` + restart. A wedged event loop then gets killed +
+  restarted automatically. Do this only once you've confirmed it on
+  hardware — a `Type=notify` unit that never sends `READY=1` is killed.
+
+### Pi hardening
+
+The bridge sits on a gym LAN on the studio's static IP; treat it like
+any exposed box:
+
+- `chmod 600 ~/champ-bridge/.env` — the token + InBody key are secrets
+  and a default home is world-readable.
+- **SSH key-only auth** — disable password login
+  (`PasswordAuthentication no` in `/etc/ssh/sshd_config`, then
+  `sudo systemctl restart ssh`).
+- **Change the default `pi` password** (`passwd`) — a fresh Pi OS
+  image ships with a known default.
+- **Automatic security updates**:
+  ```sh
+  sudo apt-get install -y unattended-upgrades
+  sudo dpkg-reconfigure -plow unattended-upgrades
+  ```
+- The ANT+ udev rule uses `MODE=0660, GROUP=plugdev` (not `0666`) so
+  the stick isn't world-writable — see the setup steps above.
 
 ## Token rotation
 

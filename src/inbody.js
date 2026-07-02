@@ -12,6 +12,7 @@
 // daily counter and stop well under it (config.inbodyDailyCap, default 450).
 
 import { request } from 'undici'
+import { writeFileSync, readFileSync, renameSync } from 'node:fs'
 import { config } from './config.js'
 import {
   getInbodyPending, postInbodyIngest,
@@ -27,6 +28,55 @@ export function withinDailyCap(sentToday, cap) {
 // UTC date key (YYYY-MM-DD) used to reset the daily counter at 00:00 UTC.
 export function utcDateKey(d = new Date()) {
   return d.toISOString().slice(0, 10)
+}
+
+// Mask a usertoken (a member phone number) for logs — last 4 digits only. It's
+// PII and journald is persisted/shipped. e.g. '0873147675' → '******7675'.
+export function maskUsertoken(token) {
+  const s = String(token ?? '')
+  if (s.length <= 4) return s ? '*'.repeat(s.length) : ''
+  return '*'.repeat(s.length - 4) + s.slice(-4)
+}
+
+// ── Daily-cap persistence ──────────────────────────────────────────────────
+// The daily counter is otherwise in-memory only, so every restart reset `sent`
+// to 0. A couple of restarts on a busy backfill day could breach InBody's
+// 500/device/day cap. We persist { day, sent } to a small JSON file and reload
+// it at boot; the UTC-day-rollover reset still applies (a stale file from
+// yesterday is treated as sent=0).
+
+// Pure: given the on-disk state and today's UTC key, return the counter to run
+// with. A file from a previous UTC day is discarded (fresh day → sent=0).
+export function reconcilePersistedState(persisted, today) {
+  if (persisted && persisted.day === today && Number.isFinite(persisted.sent) && persisted.sent >= 0) {
+    return { day: today, sent: persisted.sent }
+  }
+  return { day: today, sent: 0 }
+}
+
+// Load the persisted counter from disk, reconciled against the current UTC day.
+// Never throws — a missing / corrupt file just yields a fresh { day, sent:0 }.
+export function loadInbodyState(path = config.inbodyStateFile, today = utcDateKey()) {
+  let persisted = null
+  try {
+    persisted = JSON.parse(readFileSync(path, 'utf8'))
+  } catch { /* no file yet, or corrupt — start fresh */ }
+  return reconcilePersistedState(persisted, today)
+}
+
+// Atomically persist { day, sent }: write a temp file then rename over the
+// target (rename is atomic on the same filesystem) so a power-cut mid-write
+// can't leave a truncated/corrupt counter file. Never throws — persistence is
+// best-effort; the cap still protects within a single process lifetime.
+export function saveInbodyState(state, path = config.inbodyStateFile) {
+  if (!path) return
+  try {
+    const tmp = `${path}.tmp`
+    writeFileSync(tmp, JSON.stringify({ day: state.day, sent: state.sent }), 'utf8')
+    renameSync(tmp, path)
+  } catch (err) {
+    logWarn('inbody', 'failed to persist daily-cap counter', { err })
+  }
 }
 
 // Pull one scan's full measurement set from the Lookin'Body REST API.
@@ -148,10 +198,11 @@ export async function runInbodyCycle(state, deps = {}) {
     account = config.inbodyAccount,
     cap = config.inbodyDailyCap,
     today = utcDateKey(),
+    save = saveInbodyState,
   } = deps
 
-  // Reset the counter when the UTC date rolls over.
-  if (state.day !== today) { state.day = today; state.sent = 0 }
+  // Reset the counter when the UTC date rolls over, and persist the reset.
+  if (state.day !== today) { state.day = today; state.sent = 0; save(state) }
 
   const remaining = withinDailyCap(state.sent, cap)
   if (remaining <= 0) {
@@ -168,6 +219,7 @@ export async function runInbodyCycle(state, deps = {}) {
   for (const p of pending) {
     const r = await fetcher({ apiUrl, apiKey, account, usertoken: p.usertoken, datetimes: p.datetimes })
     state.sent += 1
+    save(state)
     if (r.ok && r.body) {
       results.push({ event_id: p.event_id, raw: r.body })
     } else {
@@ -201,9 +253,10 @@ export async function runInbodyBackfillCycle(state, deps = {}) {
     account = config.inbodyAccount,
     cap = config.inbodyDailyCap,
     today = utcDateKey(),
+    save = saveInbodyState,
   } = deps
 
-  if (state.day !== today) { state.day = today; state.sent = 0 }
+  if (state.day !== today) { state.day = today; state.sent = 0; save(state) }
   if (withinDailyCap(state.sent, cap) <= 0) return { requests: 0, ingested: 0 }
 
   const pendRes = await getBackfillPending()
@@ -225,6 +278,7 @@ export async function runInbodyBackfillCycle(state, deps = {}) {
       if (withinDailyCap(state.sent, cap) <= 0) break
       const dtRes = await datetimesFetcher({ apiUrl, apiKey, account, usertoken: cand })
       state.sent += 1
+      save(state)
       if (!dtRes.ok) {
         if (dtRes.statusCode === 401) { authError = true; break } // IP / cap / subscription
         continue // 400 / no-data for this format → try the next candidate
@@ -257,6 +311,7 @@ export async function runInbodyBackfillCycle(state, deps = {}) {
       if (withinDailyCap(state.sent, cap) <= 0) break
       const r = await fetcher({ apiUrl, apiKey, account, usertoken: matched, datetimes: dt })
       state.sent += 1
+      save(state)
       if (r.ok && r.body) scans.push({ datetimes: dt, raw: r.body })
       else if (r.statusCode === 401) { hit401 = true; break }
     }
@@ -266,7 +321,7 @@ export async function runInbodyBackfillCycle(state, deps = {}) {
     const ingestRes = await postBackfillIngest({ request_id: req.request_id, usertoken: matched, scans })
     if (ingestRes.ok) ingested += ingestRes.body?.ingested ?? 0
     handled += 1
-    logInfo('inbody', 'backfill complete', { request_id: req.request_id, usertoken: matched, found: datetimes.length, scans: scans.length })
+    logInfo('inbody', 'backfill complete', { request_id: req.request_id, usertoken: maskUsertoken(matched), found: datetimes.length, scans: scans.length })
     if (hit401) break
   }
 

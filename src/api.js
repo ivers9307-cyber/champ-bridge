@@ -98,11 +98,22 @@ async function getJson(path) {
   }
 }
 
-export async function postHeartbeat({ status = 'online' } = {}) {
-  return postJson('/api/bridge/heartbeat', {
+/**
+ * Heartbeat. Beyond status + version we attach operational telemetry so the CRM
+ * can later flag an "online but blind" bridge (process up, but reading nothing).
+ * These are ADDITIVE fields — the CRM route ignores unknown keys, so sending
+ * them is safe ahead of any CRM-side consumption.
+ *
+ * @param {{ status?: string, telemetry?: object }} opts
+ *   telemetry: { pending_samples, adapters, uptime_s }
+ */
+export async function postHeartbeat({ status = 'online', telemetry = null } = {}) {
+  const body = {
     software_version: config.softwareVersion,
     status,
-  })
+  }
+  if (telemetry && typeof telemetry === 'object') Object.assign(body, telemetry)
+  return postJson('/api/bridge/heartbeat', body)
 }
 
 /**

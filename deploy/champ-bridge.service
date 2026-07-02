@@ -5,14 +5,49 @@
 #   sudo systemctl enable --now champ-bridge
 # Logs:
 #   sudo journalctl -u champ-bridge -f
+#
+# ── Pi has NO real-time clock ────────────────────────────────────────────────
+# After a power cut a Pi boots with a wildly wrong clock until NTP corrects it.
+# The bridge stamps `recorded_at` from the local clock, so starting before the
+# clock is set writes garbage timestamps. We order AFTER time-sync.target and
+# rely on systemd-timesyncd's wait unit to actually BLOCK boot until the clock
+# is synced. Enable it once per Pi:
+#   sudo systemctl enable systemd-time-wait-sync.service
+# (Verify with: `systemctl status systemd-time-wait-sync`. Without it,
+# time-sync.target is reached immediately and gives no real guarantee.)
+#
+# ── Persistent journald (survive a power cut) ────────────────────────────────
+# Pi OS defaults journald to volatile RAM storage, so the logs you need to
+# debug a crash/power-cut are gone after reboot. Make them persistent + capped
+# once per Pi (a cap matters on an SD card):
+#   sudo mkdir -p /var/log/journal
+#   sudo systemd-tmpfiles --create --prefix /var/log/journal
+#   # in /etc/systemd/journald.conf:  Storage=persistent  and  SystemMaxUse=200M
+#   sudo systemctl restart systemd-journald
 
 [Unit]
 Description=CHAMP heart rate bridge
-After=network-online.target bluetooth.service
-Wants=network-online.target
+# time-sync.target: don't start until the clock is trustworthy (no RTC — see
+# the note above; also enable systemd-time-wait-sync.service).
+After=network-online.target bluetooth.service time-sync.target
+Wants=network-online.target time-sync.target
 
 [Service]
+# Type=simple for now. The sd_notify watchdog plumbing IS wired (READY=1 at
+# startup + periodic WATCHDOG=1 from the main loop, via src/sd-notify.js), but
+# it shells out to `systemd-notify` and has NOT been verified on a real Pi.
+# To turn the watchdog on after on-Pi verification:
+#   1. flip this to `Type=notify`
+#   2. uncomment WatchdogSec + NotifyAccess below
+#   3. sudo systemctl daemon-reload && sudo systemctl restart champ-bridge
+#   4. confirm `systemctl show champ-bridge -p WatchdogUSec` is non-zero and
+#      that a wedged process gets killed + restarted.
+# NotifyAccess=all is required because the ping arrives from a short-lived
+# `systemd-notify` child, not the main node PID.
 Type=simple
+#Type=notify
+#WatchdogSec=120
+#NotifyAccess=all
 User=pi
 Group=pi
 WorkingDirectory=/home/pi/champ-bridge
@@ -21,14 +56,32 @@ Environment=NODE_ENV=production
 ExecStart=/usr/bin/node /home/pi/champ-bridge/src/index.js
 Restart=always
 RestartSec=10
+# If the watchdog kills a wedged process, restart rather than give up.
+WatchdogSignal=SIGABRT
 # Don't fight the OS for cycles — chest-strap traffic is light.
 Nice=5
 
+# InBody daily-cap counter is persisted to the working dir by default. If you
+# tighten the sandbox so the working dir is read-only, point the counter at a
+# StateDirectory instead: uncomment the next two lines and set
+# INBODY_STATE_FILE=/var/lib/champ-bridge/inbody-daily-count.json in .env.
+#StateDirectory=champ-bridge
+#ReadWritePaths=/home/pi/champ-bridge
+
 # Hardening — bridge only needs network + bluetooth, nothing else.
 ProtectSystem=full
+# NB: ProtectHome=read-only would block the InBody counter file write in the
+# working dir. Left OFF the strict setting; if you enable it, use
+# StateDirectory + INBODY_STATE_FILE above so the counter still persists.
 ProtectHome=read-only
+ReadWritePaths=/home/pi/champ-bridge
 PrivateTmp=true
 NoNewPrivileges=true
+# Cheap containment. The bridge only makes outbound HTTPS + talks to local
+# USB/Bluetooth, so cap memory and restrict socket families. AF_NETLINK is
+# needed by bluez; AF_UNIX by sd_notify + node internals.
+MemoryMax=512M
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK AF_BLUETOOTH
 
 [Install]
 WantedBy=multi-user.target

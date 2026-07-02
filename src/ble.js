@@ -85,6 +85,10 @@ class FakeBle extends EventEmitter {
       return { device_key: key, name: meta.name || null, rssi: -50, last_bpm: s.lastBpm }
     })
   }
+
+  status() {
+    return { protocol: 'ble', fake: true, powered_on: !!this._tick, connections: this.connected.size }
+  }
 }
 
 class RealBle extends EventEmitter {
@@ -225,6 +229,13 @@ class RealBle extends EventEmitter {
     return Array.from(this.connected.entries()).map(([key, s]) => ({
       device_key: key, name: s.name, rssi: s.rssi, last_bpm: s.lastBpm,
     }))
+  }
+
+  // Operational telemetry for the heartbeat: is the noble stack powered on, and
+  // how many GATT connections are live? `powered_on:false` = the BLE adapter is
+  // down (radio off / bluez not up) even though the process is running.
+  status() {
+    return { protocol: 'ble', fake: false, powered_on: !!this._poweredOn, connections: this.connected.size }
   }
 }
 

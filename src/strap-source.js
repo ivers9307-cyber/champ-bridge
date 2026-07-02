@@ -77,6 +77,21 @@ class StrapSource extends EventEmitter {
     }
     return all
   }
+
+  // Per-adapter operational status for the heartbeat telemetry. Lets the CRM
+  // spot an "online but blind" bridge — process up, but the ANT+ stick isn't
+  // present / the BLE radio isn't powered, so it's reading nothing.
+  getAdapterStatus() {
+    const out = {}
+    for (const { name, adapter } of this.adapters) {
+      try {
+        out[name] = typeof adapter.status === 'function' ? adapter.status() : { present: null }
+      } catch {
+        out[name] = { present: null }
+      }
+    }
+    return out
+  }
 }
 
 export function createStrapSource() {

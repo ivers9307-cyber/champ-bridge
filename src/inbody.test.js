@@ -9,8 +9,13 @@ process.env.CHAMP_API_URL = process.env.CHAMP_API_URL || 'http://localhost:3000'
 const {
   withinDailyCap, utcDateKey, runInbodyCycle, inbodyDataUrl,
   inbodyDatetimesUrl, extractInbodyDatetimes, runInbodyBackfillCycle,
-  inbodyUsertokenCandidates,
+  inbodyUsertokenCandidates, maskUsertoken, reconcilePersistedState,
+  loadInbodyState, saveInbodyState,
 } = await import('./inbody.js')
+
+const { mkdtempSync, rmSync, existsSync } = await import('node:fs')
+const { join } = await import('node:path')
+const { tmpdir } = await import('node:os')
 
 const okIngest = vi.fn(async (results) => ({ ok: true, body: { processed: results.length, linked: 0 } }))
 const okFetch = vi.fn(async () => ({ ok: true, statusCode: 200, body: { Weight: 80 } }))
@@ -89,7 +94,7 @@ describe('inbodyUsertokenCandidates', () => {
 
 describe('runInbodyBackfillCycle', () => {
   const base = (over) => ({
-    today: '2024-01-01', apiUrl: 'x', apiKey: 'k', account: 'a', cap: 450,
+    today: '2024-01-01', apiUrl: 'x', apiKey: 'k', account: 'a', cap: 450, save: () => {},
     getBackfillPending: vi.fn(async () => ({ ok: true, body: { pending: [] } })),
     postBackfillIngest: vi.fn(async () => ({ ok: true, body: { ingested: 0 } })),
     datetimesFetcher: vi.fn(async () => ({ ok: true, statusCode: 200, body: ['20240101120000'] })),
@@ -171,7 +176,7 @@ describe('runInbodyBackfillCycle', () => {
 })
 
 describe('runInbodyCycle', () => {
-  const deps = (over) => ({ today: '2024-01-01', getPending: vi.fn(async () => pendingOf(0)), postIngest: okIngest, fetcher: okFetch, apiUrl: 'x', apiKey: 'k', account: 'a', cap: 450, ...over })
+  const deps = (over) => ({ today: '2024-01-01', getPending: vi.fn(async () => pendingOf(0)), postIngest: okIngest, fetcher: okFetch, apiUrl: 'x', apiKey: 'k', account: 'a', cap: 450, save: () => {}, ...over })
 
   it('fetches each pending scan and relays the batch', async () => {
     const getPending = vi.fn(async () => pendingOf(2))
@@ -231,5 +236,86 @@ describe('runInbodyCycle', () => {
     expect(out.fetched).toBe(1)
     expect(state.day).toBe('2024-01-01')
     expect(state.sent).toBe(1)
+  })
+
+  it('persists the counter after each fetch (save dep called)', async () => {
+    const fetcher = vi.fn(async () => ({ ok: true, statusCode: 200, body: { Weight: 80 } }))
+    const getPending = vi.fn(async () => pendingOf(2))
+    const save = vi.fn()
+    const state = { day: '2024-01-01', sent: 0 }
+    await runInbodyCycle(state, deps({ fetcher, getPending, save }))
+    // Two fetches → at least two saves, each seeing an incremented counter.
+    expect(save).toHaveBeenCalled()
+    expect(save.mock.calls.some(([s]) => s.sent === 2)).toBe(true)
+  })
+})
+
+describe('maskUsertoken', () => {
+  it('shows only the last 4 digits of a phone', () => {
+    expect(maskUsertoken('0873147675')).toBe('******7675')
+    expect(maskUsertoken('353873147675')).toBe('********7675')
+  })
+  it('fully masks a very short value', () => {
+    expect(maskUsertoken('12')).toBe('**')
+    expect(maskUsertoken('1234')).toBe('****')
+  })
+  it('handles null / undefined / empty', () => {
+    expect(maskUsertoken(null)).toBe('')
+    expect(maskUsertoken(undefined)).toBe('')
+    expect(maskUsertoken('')).toBe('')
+  })
+})
+
+describe('reconcilePersistedState', () => {
+  it('keeps the persisted count when the day matches', () => {
+    expect(reconcilePersistedState({ day: '2024-01-01', sent: 42 }, '2024-01-01'))
+      .toEqual({ day: '2024-01-01', sent: 42 })
+  })
+  it('resets to 0 when the persisted day is stale', () => {
+    expect(reconcilePersistedState({ day: '2023-12-31', sent: 400 }, '2024-01-01'))
+      .toEqual({ day: '2024-01-01', sent: 0 })
+  })
+  it('resets on missing / malformed state', () => {
+    expect(reconcilePersistedState(null, '2024-01-01')).toEqual({ day: '2024-01-01', sent: 0 })
+    expect(reconcilePersistedState({ day: '2024-01-01', sent: -1 }, '2024-01-01'))
+      .toEqual({ day: '2024-01-01', sent: 0 })
+    expect(reconcilePersistedState({ day: '2024-01-01', sent: 'x' }, '2024-01-01'))
+      .toEqual({ day: '2024-01-01', sent: 0 })
+  })
+})
+
+describe('inbody daily-cap persistence round-trip', () => {
+  it('save then load returns the same {day,sent} for today', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'inbody-'))
+    const path = join(dir, 'count.json')
+    try {
+      saveInbodyState({ day: '2024-01-01', sent: 137 }, path)
+      expect(existsSync(path)).toBe(true)
+      const loaded = loadInbodyState(path, '2024-01-01')
+      expect(loaded).toEqual({ day: '2024-01-01', sent: 137 })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('load discards a file from a previous UTC day (fresh sent=0)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'inbody-'))
+    const path = join(dir, 'count.json')
+    try {
+      saveInbodyState({ day: '2024-01-01', sent: 400 }, path)
+      const loaded = loadInbodyState(path, '2024-01-02') // next day
+      expect(loaded).toEqual({ day: '2024-01-02', sent: 0 })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('load returns a fresh counter when the file is missing', () => {
+    const loaded = loadInbodyState(join(tmpdir(), 'does-not-exist-xyz.json'), '2024-01-01')
+    expect(loaded).toEqual({ day: '2024-01-01', sent: 0 })
+  })
+
+  it('saveInbodyState never throws on an unwritable path', () => {
+    expect(() => saveInbodyState({ day: '2024-01-01', sent: 1 }, '/no/such/dir/x.json')).not.toThrow()
   })
 })

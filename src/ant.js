@@ -94,6 +94,12 @@ class FakeAnt extends EventEmitter {
       return { device_key: key, name: meta.name || null, rssi: null, last_bpm: s.lastBpm }
     })
   }
+
+  // Operational telemetry for the heartbeat. Fake adapter is always "present"
+  // once ticking so dev heartbeats look healthy.
+  status() {
+    return { protocol: 'ant', fake: true, stick_present: !!this._tick, seen: this.seen.size }
+  }
 }
 
 class RealAnt extends EventEmitter {
@@ -266,6 +272,13 @@ class RealAnt extends EventEmitter {
     return Array.from(this.seen.entries()).map(([key, s]) => ({
       device_key: key, name: null, rssi: s.rssi ?? null, last_bpm: s.lastBpm,
     }))
+  }
+
+  // Operational telemetry for the heartbeat: is the ANT+ stick open + scanning?
+  // `stick_present:false` on a live bridge = the room is going unread (stick
+  // unplugged / enumeration failed) even though the process is up.
+  status() {
+    return { protocol: 'ant', fake: false, stick_present: !!this._stick, seen: this.seen.size }
   }
 }
 

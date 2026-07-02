@@ -15,7 +15,8 @@ import { logInfo, logWarn, logError } from './log.js'
 import { createStrapSource } from './strap-source.js'
 import { pushSample, startFlushLoop, pendingCount, flushSamples } from './buffer.js'
 import { postHeartbeat, postScan } from './api.js'
-import { runInbodyCycle, runInbodyBackfillCycle } from './inbody.js'
+import { runInbodyCycle, runInbodyBackfillCycle, loadInbodyState } from './inbody.js'
+import { notifyReady, notifyWatchdog, notifyStopping, watchdogPingMs } from './sd-notify.js'
 
 // Crash safety net. Without these an uncaught exception / unhandled
 // rejection tears the process down immediately and silently — the
@@ -49,6 +50,15 @@ async function main() {
 
   const straps = createStrapSource()
 
+  // Operational telemetry attached to every heartbeat so the CRM can detect an
+  // "online but blind" bridge — process up, but reading nothing (stick
+  // unplugged, BLE radio down) or drowning in an un-drainable buffer.
+  const buildTelemetry = () => ({
+    pending_samples: pendingCount(),
+    adapters: straps.getAdapterStatus(),
+    uptime_s: Math.round(process.uptime()),
+  })
+
   straps.on('strap-sample', (s) => {
     pushSample({ device_key: s.device_key, recorded_at: s.recorded_at, bpm: s.bpm })
   })
@@ -63,12 +73,28 @@ async function main() {
 
   await straps.start()
 
+  // Tell systemd we're up. NO-OP unless launched under a Type=notify unit (see
+  // sd-notify.js) — safe to call unconditionally on dev / non-systemd.
+  notifyReady()
+
   // Initial heartbeat tells the server "I'm online with this version".
-  await postHeartbeat({ status: 'online' }).catch((err) => {
+  await postHeartbeat({ status: 'online', telemetry: buildTelemetry() }).catch((err) => {
     logWarn('bridge', 'initial heartbeat failed (will retry)', { err })
   })
 
   const flushTimer = startFlushLoop()
+
+  // systemd watchdog keep-alive. When WatchdogSec is set, systemd exports
+  // WATCHDOG_USEC; we ping at half that. If the event loop wedges, the pings
+  // stop and systemd restarts us. NO-OP when not under a watchdog unit.
+  let watchdogTimer = null
+  const pingMs = watchdogPingMs()
+  if (pingMs) {
+    logInfo('bridge', 'systemd watchdog active', { pingMs })
+    notifyWatchdog() // one immediate ping so the first deadline is armed
+    watchdogTimer = setInterval(() => notifyWatchdog(), pingMs)
+    if (typeof watchdogTimer.unref === 'function') watchdogTimer.unref()
+  }
 
   const scanTimer = setInterval(async () => {
     try {
@@ -84,7 +110,7 @@ async function main() {
       // are flowing, /samples already touches last_seen_at, so we
       // skip the redundant call.
       if (pendingCount() === 0) {
-        await postHeartbeat({ status: 'online' })
+        await postHeartbeat({ status: 'online', telemetry: buildTelemetry() })
       }
     } catch (err) {
       logWarn('bridge', 'heartbeat threw', { err })
@@ -104,8 +130,10 @@ async function main() {
     })
     // One shared daily-cap counter for both the go-forward enrich and the
     // on-demand backfill. Enrich first (time-sensitive new scans), then drain
-    // any backfill requests with whatever call headroom is left.
-    const inbodyState = { day: null, sent: 0 }
+    // any backfill requests with whatever call headroom is left. Loaded from
+    // disk so a restart doesn't reset `sent` to 0 and risk breaching the cap.
+    const inbodyState = loadInbodyState()
+    logInfo('inbody', 'loaded daily-cap counter', { day: inbodyState.day, sent: inbodyState.sent })
     const inbodyTick = async () => {
       await runInbodyCycle(inbodyState).catch((err) => logWarn('inbody', 'cycle threw', { err }))
       await runInbodyBackfillCycle(inbodyState).catch((err) => logWarn('inbody', 'backfill threw', { err }))
@@ -123,6 +151,9 @@ async function main() {
     if (shuttingDown) return
     shuttingDown = true
     logInfo('bridge', `received ${signal}, shutting down`)
+    // Stop the watchdog clock so systemd doesn't kill us mid-drain.
+    notifyStopping()
+    if (watchdogTimer) clearInterval(watchdogTimer)
     clearInterval(flushTimer)
     clearInterval(scanTimer)
     clearInterval(heartbeatTimer)
