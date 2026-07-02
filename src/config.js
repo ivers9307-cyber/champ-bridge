@@ -31,6 +31,10 @@
 //   INBODY_API_URL         default https://apieur.lookinbody.com
 //   INBODY_POLL_MS=300000  how often to poll the CRM for pending scans
 //   INBODY_DAILY_CAP=450   safety cap under InBody's 500 calls/device/day
+//   INBODY_STATE_FILE      where the { day, sent } daily-cap counter persists
+//                          (default: inbody-daily-count.json in the working dir)
+
+import { createRequire } from 'node:module'
 
 const required = ['CHAMP_BRIDGE_TOKEN', 'CHAMP_API_URL']
 const missing = required.filter((k) => !process.env[k])
@@ -40,25 +44,90 @@ if (missing.length > 0) {
   process.exit(1)
 }
 
+// Read the REAL version out of package.json. `npm_package_version` is only set
+// when the process is launched via an npm script; systemd runs
+// `node src/index.js` directly, so relying on the env var pinned every
+// heartbeat to the '0.2.0' fallback forever. createRequire lets us pull it in
+// from the package manifest regardless of how the process was started.
+export function readPackageVersion(fallback = '0.0.0') {
+  try {
+    const require = createRequire(import.meta.url)
+    const pkg = require('../package.json')
+    return pkg.version || fallback
+  } catch {
+    return fallback
+  }
+}
+
+// Parse an interval env var, falling back to `def`, then clamp to `min` so a
+// negative / zero / tiny value can't turn a poll loop into a busy-spin that
+// hammers the API (and the SD card). NaN → default. Non-integers are floored.
+export function clampInterval(raw, def, min) {
+  const n = parseInt(raw, 10)
+  const val = Number.isFinite(n) && n > 0 ? n : def
+  return Math.max(min, val)
+}
+
+// Light sanity check on the bearer token shape. CRM tokens are `bbr_…`; a
+// value missing the prefix is almost certainly a mis-paste (whole .env line,
+// quotes, a URL). We only warn — the CRM is the real authority — but a warn in
+// the journal turns a silent 401 loop into an obvious "check your token".
+export function tokenLooksValid(token) {
+  return typeof token === 'string' && /^bbr_/.test(token) && token.length >= 8
+}
+
+// Validate CHAMP_API_URL parses as an http(s) URL. Fails fast (like the
+// missing-env check) rather than letting every request throw an opaque
+// "invalid URL" deep in undici.
+function normaliseApiUrl(raw) {
+  const trimmed = String(raw).replace(/\/+$/, '')
+  let u
+  try { u = new URL(trimmed) } catch {
+    // eslint-disable-next-line no-console
+    console.error(`[champ-bridge] CHAMP_API_URL is not a valid URL: ${raw}`)
+    process.exit(1)
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    // eslint-disable-next-line no-console
+    console.error(`[champ-bridge] CHAMP_API_URL must be http(s): ${raw}`)
+    process.exit(1)
+  }
+  return trimmed
+}
+
+if (!tokenLooksValid(process.env.CHAMP_BRIDGE_TOKEN)) {
+  // eslint-disable-next-line no-console
+  console.warn('[champ-bridge] CHAMP_BRIDGE_TOKEN does not look like a bbr_ token — check .env')
+}
+
 export const config = {
   token: process.env.CHAMP_BRIDGE_TOKEN,
-  apiUrl: process.env.CHAMP_API_URL.replace(/\/+$/, ''),
+  apiUrl: normaliseApiUrl(process.env.CHAMP_API_URL),
   // FAKE_BLE kept as an alias so existing dev scripts don't break.
   fakeStraps: process.env.FAKE_STRAPS === '1' || process.env.FAKE_BLE === '1',
   // Both protocols on by default; set to '0' to disable one.
   enableAnt: process.env.ENABLE_ANT !== '0',
   enableBle: process.env.ENABLE_BLE !== '0',
-  batchIntervalMs: parseInt(process.env.BATCH_INTERVAL_MS, 10) || 3000,
-  scanIntervalMs: parseInt(process.env.SCAN_INTERVAL_MS, 10) || 5000,
-  heartbeatMs: parseInt(process.env.HEARTBEAT_MS, 10) || 30_000,
+  // Clamped to sane minimums so a fat-fingered / negative env can't busy-loop.
+  batchIntervalMs: clampInterval(process.env.BATCH_INTERVAL_MS, 3000, 500),
+  scanIntervalMs: clampInterval(process.env.SCAN_INTERVAL_MS, 5000, 1000),
+  heartbeatMs: clampInterval(process.env.HEARTBEAT_MS, 30_000, 5000),
   maxConnections: parseInt(process.env.MAX_CONNECTIONS, 10) || 30,
   logLevel: process.env.LOG_LEVEL || 'info',
-  softwareVersion: process.env.npm_package_version || '0.2.0',
+  softwareVersion: readPackageVersion('0.2.0'),
   // InBody enrichment — only active when both key + account are present.
   inbodyApiKey: process.env.INBODY_API_KEY || null,
   inbodyAccount: process.env.INBODY_ACCOUNT || null,
   inbodyApiUrl: (process.env.INBODY_API_URL || 'https://apieur.lookinbody.com').replace(/\/+$/, ''),
-  inbodyPollMs: parseInt(process.env.INBODY_POLL_MS, 10) || 300_000,
+  // Clamp the poll to >=30s: the InBody REST API is IP-rate-limited and each
+  // cycle can burn several of the 500/day calls — a tiny value would blow the
+  // cap in minutes.
+  inbodyPollMs: clampInterval(process.env.INBODY_POLL_MS, 300_000, 30_000),
   inbodyDailyCap: parseInt(process.env.INBODY_DAILY_CAP, 10) || 450,
+  // Where the { day, sent } daily-cap counter is persisted so a restart
+  // doesn't reset it to 0 and risk breaching InBody's 500/day cap. Defaults to
+  // the working dir; override with INBODY_STATE_FILE when the working dir is
+  // read-only under systemd (point it at a StateDirectory / ReadWritePaths).
+  inbodyStateFile: process.env.INBODY_STATE_FILE || 'inbody-daily-count.json',
   get inbodyEnabled() { return !!(this.inbodyApiKey && this.inbodyAccount) },
 }

@@ -15,6 +15,12 @@ const MAX_BUFFER = 5000  // ~3min of 30 straps × 1Hz before we drop
 const SERVER_BATCH_CAP = 1000  // matches /api/bridge/samples cap
 
 let buffer = []
+// In-flight guard: the flush loop is a setInterval, so a slow API call
+// (one flush still awaiting the network) must not let the next tick
+// start a second, concurrent flush — that would double-send the same
+// snapshot and race the re-prepend-on-failure logic. While a flush is
+// running, later ticks no-op.
+let flushing = false
 
 export function pushSample(s) {
   buffer.push(s)
@@ -35,29 +41,41 @@ export function pendingCount() {
  * the next tick retries.
  */
 export async function flushSamples() {
-  if (buffer.length === 0) return { sent: 0 }
-  // Snapshot + clear; we'll re-prepend on partial failure.
-  const snapshot = buffer
-  buffer = []
-
-  let sent = 0
-  for (let i = 0; i < snapshot.length; i += SERVER_BATCH_CAP) {
-    const chunk = snapshot.slice(i, i + SERVER_BATCH_CAP)
-    const out = await postSamples(chunk)
-    if (!out.ok) {
-      // Re-prepend the rest (this chunk + everything after) for retry.
-      const remaining = snapshot.slice(i)
-      buffer = [...remaining, ...buffer]
-      if (buffer.length > MAX_BUFFER) buffer = buffer.slice(-MAX_BUFFER)
-      logWarn('buffer', 'flush partial failure — will retry', {
-        chunk_size: chunk.length, remaining: remaining.length,
-      })
-      return { sent, failed: true }
-    }
-    sent += chunk.length
+  // Guard against a slow API letting the interval stack a second flush
+  // on top of an in-flight one. A concurrent flush would snapshot +
+  // clear the same buffer twice and double-send / race the retry.
+  if (flushing) {
+    logDebug('buffer', 'flush already in flight — skipping this tick')
+    return { sent: 0, skipped: true }
   }
-  if (sent > 0) logDebug('buffer', `flushed ${sent} samples`)
-  return { sent }
+  if (buffer.length === 0) return { sent: 0 }
+  flushing = true
+  try {
+    // Snapshot + clear; we'll re-prepend on partial failure.
+    const snapshot = buffer
+    buffer = []
+
+    let sent = 0
+    for (let i = 0; i < snapshot.length; i += SERVER_BATCH_CAP) {
+      const chunk = snapshot.slice(i, i + SERVER_BATCH_CAP)
+      const out = await postSamples(chunk)
+      if (!out.ok) {
+        // Re-prepend the rest (this chunk + everything after) for retry.
+        const remaining = snapshot.slice(i)
+        buffer = [...remaining, ...buffer]
+        if (buffer.length > MAX_BUFFER) buffer = buffer.slice(-MAX_BUFFER)
+        logWarn('buffer', 'flush partial failure — will retry', {
+          chunk_size: chunk.length, remaining: remaining.length,
+        })
+        return { sent, failed: true }
+      }
+      sent += chunk.length
+    }
+    if (sent > 0) logDebug('buffer', `flushed ${sent} samples`)
+    return { sent }
+  } finally {
+    flushing = false
+  }
 }
 
 export function startFlushLoop() {
