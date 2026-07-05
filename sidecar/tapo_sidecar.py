@@ -52,7 +52,21 @@ def log(msg, **meta):
 
 
 class Registry:
-    """sidecar_id -> {device, parent, kind, model, alias, host, is_on, reachable, seen_at}"""
+    """sidecar_id -> {device, parent, kind, model, alias, host, is_on, reachable, seen_at}
+
+    Concurrency: a POST command can run while the refresh loop is mid-pass.
+    That's safe because python-kasa serialises all traffic to one device
+    behind SmartProtocol._query_lock (one lock per Device; hub children
+    share the parent's protocol via _ChildProtocolWrapper) — verified in
+    python-kasa 0.10.2. If an upgrade moves or removes that locking,
+    re-check this invariant before bumping requirements.txt.
+
+    Lifecycle: entries are never purged. A device removed from TAPO_HOSTS
+    (or that stops answering discovery) stays as a permanently-unreachable
+    entry — intentional: it mirrors the CRM's disable-off-ramp (the row
+    goes stale there and the operator disables it). Bounded at studio
+    scale (tens of devices); not a leak.
+    """
 
     def __init__(self):
         self.entries = {}
@@ -90,7 +104,13 @@ class Registry:
         for host in hosts:
             try:
                 dev = await self._connect(host)
-                await dev.update()
+                # Ceiling per host: python-kasa's default retry stack
+                # (retry_count=3 × 5s HTTP timeout + backoffs) can cost
+                # ~23s on a dead host, stalling this sequential pass and
+                # letting staleness pile up on every other device. The
+                # TimeoutError lands in the except below (pop root +
+                # mark unreachable), which is exactly right.
+                await asyncio.wait_for(dev.update(), timeout=5)
                 if dev.device_type == DeviceType.Hub:
                     for child in (dev.children or []):
                         sid = hub_child_id(child.device_id)
@@ -146,10 +166,13 @@ async def handle_set_state(request):
         dev = entry["device"]
         # Hub children command through their own object; python-kasa routes
         # via the parent transport internally.
+        # 4s ceiling: the Node bridge gives this call a 5s HTTP budget —
+        # our 502 must beat its hangup, or the bridge sees a socket error
+        # while an orphaned coroutine runs the command to completion.
         if want_on:
-            await dev.turn_on()
+            await asyncio.wait_for(dev.turn_on(), timeout=4)
         else:
-            await dev.turn_off()
+            await asyncio.wait_for(dev.turn_off(), timeout=4)
         entry["is_on"] = want_on
         entry["reachable"] = True
         entry["seen_at"] = time.time()
