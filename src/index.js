@@ -151,9 +151,11 @@ async function main() {
   if (config.tapoEnabled) {
     const tapoState = newTapoState()
     logInfo('tapo', 'tapo reconcile enabled', { sidecar: config.tapoSidecarUrl, pollMs: config.tapoPollMs })
-    tapoTimer = setInterval(() => {
-      runTapoCycle(tapoState, realTapoDeps).catch((err) => logWarn('tapo', 'cycle threw', { err }))
-    }, config.tapoPollMs)
+    const tapoTick = () => runTapoCycle(tapoState, realTapoDeps).catch((err) => logWarn('tapo', 'cycle threw', { err }))
+    tapoTick() // kick once on boot, then on the poll interval — power-loss
+    // recovery must reconcile within one tick, not pollMs later. Fire-and-
+    // forget: startup never blocks on a sidecar round-trip.
+    tapoTimer = setInterval(tapoTick, config.tapoPollMs)
   }
 
   // Graceful shutdown. systemd sends SIGTERM on stop; we want to

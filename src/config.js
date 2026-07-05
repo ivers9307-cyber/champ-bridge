@@ -141,5 +141,7 @@ export const config = {
   // Tapo device control (Wave T2) — OFF unless explicitly enabled.
   tapoEnabled: process.env.TAPO_ENABLED === '1',
   tapoSidecarUrl: (process.env.TAPO_SIDECAR_URL || 'http://127.0.0.1:8127').replace(/\/+$/, ''),
-  tapoPollMs: Number(process.env.TAPO_POLL_MS || 15000),
+  // Clamped like every other interval — a typo'd env (NaN → 0-delay
+  // setInterval) must not busy-loop against the CRM + sidecar.
+  tapoPollMs: clampInterval(process.env.TAPO_POLL_MS, 15_000, 5_000),
 }
