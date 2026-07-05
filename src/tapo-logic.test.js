@@ -35,6 +35,10 @@ describe('evaluateDesired', () => {
     expect(evaluateDesired(d, T('2026-07-06T12:30:00Z'), false)).toBe('on')
     expect(evaluateDesired(d, T('2026-07-06T13:30:00Z'), false)).toBe('on') // 1st ended, 2nd holds
   })
+  it('garbage override_until is ignored, falls to windows', () => {
+    const d = { ...directive, override_until: 'not-a-date' }
+    expect(evaluateDesired(d, T('2026-07-06T12:00:00Z'), false)).toBe('on') // in-window
+  })
   it('never throws on malformed input', () => {
     expect(evaluateDesired(null, Date.now(), false)).toBe(null)
     expect(evaluateDesired({ resolved_windows: 'junk' }, Date.now(), false)).toBe(null)
