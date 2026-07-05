@@ -16,6 +16,7 @@ import { createStrapSource } from './strap-source.js'
 import { pushSample, startFlushLoop, pendingCount, flushSamples } from './buffer.js'
 import { postHeartbeat, postScan } from './api.js'
 import { runInbodyCycle, runInbodyBackfillCycle, loadInbodyState } from './inbody.js'
+import { runTapoCycle, newTapoState, realTapoDeps } from './tapo.js'
 import { notifyReady, notifyWatchdog, notifyStopping, watchdogPingMs } from './sd-notify.js'
 
 // Crash safety net. Without these an uncaught exception / unhandled
@@ -142,6 +143,19 @@ async function main() {
     inbodyTimer = setInterval(inbodyTick, config.inbodyPollMs)
   }
 
+  // Tapo reconcile loop — only when TAPO_ENABLED=1. Poll the CRM for device
+  // directives, read actuals from the localhost python-kasa sidecar, apply
+  // diffs, and report state back. The sidecar owns the Tapo credentials. The
+  // directive cache lives in memory only (this repo is stateless by design).
+  let tapoTimer = null
+  if (config.tapoEnabled) {
+    const tapoState = newTapoState()
+    logInfo('tapo', 'tapo reconcile enabled', { sidecar: config.tapoSidecarUrl, pollMs: config.tapoPollMs })
+    tapoTimer = setInterval(() => {
+      runTapoCycle(tapoState, realTapoDeps).catch((err) => logWarn('tapo', 'cycle threw', { err }))
+    }, config.tapoPollMs)
+  }
+
   // Graceful shutdown. systemd sends SIGTERM on stop; we want to
   // disconnect from straps cleanly before exiting so the next start
   // doesn't hit lingering connections. A once-guard stops a double
@@ -158,6 +172,7 @@ async function main() {
     clearInterval(scanTimer)
     clearInterval(heartbeatTimer)
     if (inbodyTimer) clearInterval(inbodyTimer)
+    if (tapoTimer) clearInterval(tapoTimer)
     await straps.stop().catch(() => {})
     // Drain the buffer one last time so a clean restart/deploy doesn't
     // drop the samples collected since the last flush tick.

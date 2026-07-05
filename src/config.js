@@ -33,6 +33,14 @@
 //   INBODY_DAILY_CAP=450   safety cap under InBody's 500 calls/device/day
 //   INBODY_STATE_FILE      where the { day, sent } daily-cap counter persists
 //                          (default: inbody-daily-count.json in the working dir)
+//
+// Tapo device control (optional — only runs when TAPO_ENABLED=1). The bridge
+// polls the CRM for device directives, reads actuals from a localhost
+// python-kasa sidecar, applies diffs, and reports state back. The sidecar owns
+// the Tapo credentials — they never touch the bridge.
+//   TAPO_ENABLED=1         turn the reconcile loop on (default: off)
+//   TAPO_SIDECAR_URL       default http://127.0.0.1:8127
+//   TAPO_POLL_MS=15000     how often to reconcile directives vs actuals
 
 import { createRequire } from 'node:module'
 
@@ -130,4 +138,8 @@ export const config = {
   // read-only under systemd (point it at a StateDirectory / ReadWritePaths).
   inbodyStateFile: process.env.INBODY_STATE_FILE || 'inbody-daily-count.json',
   get inbodyEnabled() { return !!(this.inbodyApiKey && this.inbodyAccount) },
+  // Tapo device control (Wave T2) — OFF unless explicitly enabled.
+  tapoEnabled: process.env.TAPO_ENABLED === '1',
+  tapoSidecarUrl: (process.env.TAPO_SIDECAR_URL || 'http://127.0.0.1:8127').replace(/\/+$/, ''),
+  tapoPollMs: Number(process.env.TAPO_POLL_MS || 15000),
 }
