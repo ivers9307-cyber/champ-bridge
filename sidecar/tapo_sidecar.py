@@ -29,7 +29,7 @@ import sys
 import time
 
 from aiohttp import web
-from kasa import Device, DeviceConfig, Discover
+from kasa import Device, DeviceConfig, Discover, DeviceType
 from kasa.credentials import Credentials
 
 from tapo_ids import plug_id, hub_child_id, serialize_device, serialize_state
@@ -91,13 +91,14 @@ class Registry:
             try:
                 dev = await self._connect(host)
                 await dev.update()
-                children = getattr(dev, "children", None) or []
-                if children:  # a hub — register each child switch
-                    for child in children:
+                if dev.device_type == DeviceType.Hub:
+                    for child in (dev.children or []):
                         sid = hub_child_id(child.device_id)
                         self._upsert(sid, device=child, parent=dev, kind="switch",
                                      model=child.model, alias=child.alias,
                                      host=host, is_on=child.is_on)
+                    # a hub with zero adopted children registers nothing —
+                    # correct: there is no togglable entity yet.
                 else:  # a plug
                     sid = plug_id(dev.mac)
                     self._upsert(sid, device=dev, parent=None, kind="plug",
