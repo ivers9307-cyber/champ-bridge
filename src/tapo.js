@@ -25,11 +25,19 @@ import { diffCommands, buildStateReport } from './tapo-logic.js'
 const CACHE_MAX_AGE_MS = 26 * 3600 * 1000
 
 export function newTapoState() {
-  return { directives: null, fetchedAt: 0 }
+  return { directives: null, fetchedAt: 0, running: false }
 }
 
 export async function runTapoCycle(state, deps) {
   const res = { fresh: false, sidecarDown: false, commanded: 0, commandFailures: 0, reported: 0 }
+  // Reentrancy guard: a cycle slower than pollMs would otherwise overlap via
+  // setInterval and race last-write-wins on the shared state object. Skip
+  // this tick; the in-flight cycle finishes and the next tick reconciles.
+  if (state.running) {
+    res.skipped = true
+    return res
+  }
+  state.running = true
   try {
     const now = deps.now()
 
@@ -51,11 +59,11 @@ export async function runTapoCycle(state, deps) {
       state.directives = null
     }
 
-    // 2. Actuals from the sidecar.
+    // 2. Actuals from the sidecar (both reads in parallel — localhost, cheap).
     let devices = []
     let states = null
     try {
-      const [devRes, stateRes] = [await deps.getSidecarDevices(), await deps.getSidecarState()]
+      const [devRes, stateRes] = await Promise.all([deps.getSidecarDevices(), deps.getSidecarState()])
       if (devRes.ok) devices = devRes.body?.devices || []
       if (stateRes.ok) states = stateRes.body?.devices || null
     } catch (err) {
@@ -95,6 +103,8 @@ export async function runTapoCycle(state, deps) {
   } catch (err) {
     logWarn('tapo', 'cycle error', { err })
     return res
+  } finally {
+    state.running = false
   }
 }
 

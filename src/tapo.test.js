@@ -78,4 +78,21 @@ describe('runTapoCycle', () => {
     })
     await expect(runTapoCycle(newTapoState(), d)).resolves.toBeTruthy()
   })
+
+  it('reentrancy: a second concurrent invocation skips without touching deps', async () => {
+    let release
+    const gate = new Promise((r) => { release = r })
+    const d = deps({ getDirectives: vi.fn(async () => { await gate; return fail() }) })
+    const state = newTapoState()
+    const first = runTapoCycle(state, d) // parks on the gated directives fetch
+    const second = await runTapoCycle(state, d)
+    expect(second.skipped).toBe(true)
+    expect(d.getDirectives).toHaveBeenCalledTimes(1) // first cycle only
+    expect(d.getSidecarState).not.toHaveBeenCalled() // second never got past the guard
+    release()
+    await first
+    // Guard released: a fresh invocation runs normally again.
+    const third = await runTapoCycle(state, d)
+    expect(third.skipped).toBeUndefined()
+  })
 })

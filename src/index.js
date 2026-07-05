@@ -174,6 +174,8 @@ async function main() {
     clearInterval(scanTimer)
     clearInterval(heartbeatTimer)
     if (inbodyTimer) clearInterval(inbodyTimer)
+    // An in-flight tapo cycle is intentionally abandoned at SIGTERM
+    // (best-effort, matches the inbody precedent) — next boot reconciles.
     if (tapoTimer) clearInterval(tapoTimer)
     await straps.stop().catch(() => {})
     // Drain the buffer one last time so a clean restart/deploy doesn't
