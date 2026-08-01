@@ -34,12 +34,13 @@
 //   INBODY_STATE_FILE      where the { day, sent } daily-cap counter persists
 //                          (default: inbody-daily-count.json in the working dir)
 //
-// Tapo device control (optional — only runs when TAPO_ENABLED=1). The bridge
-// polls the CRM for device directives, reads actuals from a localhost
-// python-kasa sidecar, applies diffs, and reports state back. The sidecar owns
-// the Tapo credentials — they never touch the bridge.
+// Tapo/device control (optional — only runs when TAPO_ENABLED=1). The bridge
+// polls the CRM for device directives, reads actuals from the Homey Pro's
+// local REST API, applies diffs, and reports state back. The Homey API key
+// stays on the Pi (InBody-key posture).
 //   TAPO_ENABLED=1         turn the reconcile loop on (default: off)
-//   TAPO_SIDECAR_URL       default http://127.0.0.1:8127
+//   HOMEY_ADDRESS          http://<LAN IP of the Homey Pro> (DHCP-reserve it)
+//   HOMEY_API_KEY          scoped API key (Homey web app → Settings → API Keys)
 //   TAPO_POLL_MS=15000     how often to reconcile directives vs actuals
 
 import { createRequire } from 'node:module'
@@ -108,6 +109,28 @@ if (!tokenLooksValid(process.env.CHAMP_BRIDGE_TOKEN)) {
   console.warn('[champ-bridge] CHAMP_BRIDGE_TOKEN does not look like a bbr_ token — check .env')
 }
 
+// Fail-fast guard for device control: enabling the reconcile loop without a
+// reachable Homey target would silently no-op every tick. Pure + exported for
+// tests; called once at import below.
+export function homeyConfigError(env) {
+  if (env.TAPO_ENABLED !== '1') return null
+  if (!env.HOMEY_ADDRESS) return 'TAPO_ENABLED=1 requires HOMEY_ADDRESS'
+  if (!env.HOMEY_API_KEY) return 'TAPO_ENABLED=1 requires HOMEY_API_KEY'
+  let u
+  try { u = new URL(env.HOMEY_ADDRESS) } catch {
+    return `HOMEY_ADDRESS is not a valid URL: ${env.HOMEY_ADDRESS}`
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return `HOMEY_ADDRESS must be http(s): ${env.HOMEY_ADDRESS}`
+  return null
+}
+
+const homeyErr = homeyConfigError(process.env)
+if (homeyErr) {
+  // eslint-disable-next-line no-console
+  console.error(`[champ-bridge] ${homeyErr}`)
+  process.exit(1)
+}
+
 export const config = {
   token: process.env.CHAMP_BRIDGE_TOKEN,
   apiUrl: normaliseApiUrl(process.env.CHAMP_API_URL),
@@ -140,7 +163,8 @@ export const config = {
   get inbodyEnabled() { return !!(this.inbodyApiKey && this.inbodyAccount) },
   // Tapo device control (Wave T2) — OFF unless explicitly enabled.
   tapoEnabled: process.env.TAPO_ENABLED === '1',
-  tapoSidecarUrl: (process.env.TAPO_SIDECAR_URL || 'http://127.0.0.1:8127').replace(/\/+$/, ''),
+  homeyAddress: (process.env.HOMEY_ADDRESS || '').replace(/\/+$/, '') || null,
+  homeyApiKey: process.env.HOMEY_API_KEY || null,
   // Clamped like every other interval — a typo'd env (NaN → 0-delay
   // setInterval) must not busy-loop against the CRM + sidecar.
   tapoPollMs: clampInterval(process.env.TAPO_POLL_MS, 15_000, 5_000),

@@ -10,6 +10,8 @@
 // — the CRM adopt flow auto-registers them disabled. IDs are namespaced
 // `homey:<device-id>` (house convention: ant:/ble:/mac:/hub:).
 
+import { request } from 'undici'
+
 const HOMEY_PREFIX = 'homey:'
 
 function homeyDeviceList(raw) {
@@ -73,5 +75,27 @@ export function createHomeyActuation({ address, apiKey, requestJson }) {
         { value: on },
       )
     },
+  }
+}
+
+// Real HTTP dep (index-side wiring passes this in). Never throws.
+export async function homeyRequestJson(method, url, apiKey, body) {
+  try {
+    const r = await request(url, {
+      method,
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      headersTimeout: 5000,
+      bodyTimeout: 5000,
+    })
+    const text = await r.body.text()
+    let parsed = null
+    try { parsed = text ? JSON.parse(text) : null } catch { /* non-JSON */ }
+    return { ok: r.statusCode >= 200 && r.statusCode < 300, statusCode: r.statusCode, body: parsed }
+  } catch (err) {
+    return { ok: false, statusCode: 0, networkError: true, err }
   }
 }

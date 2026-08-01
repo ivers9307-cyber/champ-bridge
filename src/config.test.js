@@ -68,3 +68,23 @@ describe('tokenLooksValid', () => {
     expect(tokenLooksValid(12345)).toBe(false)
   })
 })
+
+const { homeyConfigError } = await import('./config.js')
+
+describe('homeyConfigError', () => {
+  it('is null when tapo control is disabled, whatever else is set', () => {
+    expect(homeyConfigError({})).toBe(null)
+    expect(homeyConfigError({ HOMEY_ADDRESS: 'nonsense' })).toBe(null)
+  })
+  it('requires both HOMEY vars when TAPO_ENABLED=1', () => {
+    expect(homeyConfigError({ TAPO_ENABLED: '1' })).toMatch(/HOMEY_ADDRESS/)
+    expect(homeyConfigError({ TAPO_ENABLED: '1', HOMEY_ADDRESS: 'http://192.168.1.50' })).toMatch(/HOMEY_API_KEY/)
+  })
+  it('rejects a non-http(s) or unparseable address', () => {
+    expect(homeyConfigError({ TAPO_ENABLED: '1', HOMEY_ADDRESS: '192.168.1.50', HOMEY_API_KEY: 'k' })).toMatch(/valid URL/)
+    expect(homeyConfigError({ TAPO_ENABLED: '1', HOMEY_ADDRESS: 'ftp://x', HOMEY_API_KEY: 'k' })).toMatch(/http/)
+  })
+  it('accepts a good pair', () => {
+    expect(homeyConfigError({ TAPO_ENABLED: '1', HOMEY_ADDRESS: 'http://192.168.1.50', HOMEY_API_KEY: 'k' })).toBe(null)
+  })
+})
