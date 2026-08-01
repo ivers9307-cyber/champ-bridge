@@ -131,54 +131,6 @@ is URL-validated at startup and the token is shape-checked (`bbr_`
 prefix) — a mis-paste warns in the journal instead of 401-looping
 silently.
 
-## Device control via Homey Pro (optional)
-
-The bridge can drive any on/off device paired to the studio's **Homey
-Pro** (today: the Tapo plugs/switches) on CRM-computed schedules with
-manual override from `/automations/devices`. Homey owns every vendor
-protocol; the bridge speaks only Homey's local REST API. Off unless
-`TAPO_ENABLED=1`. Design: `docs/superpowers/specs/2026-08-01-homey-actuation-design.md`.
-
-1. **DHCP-reserve the Homey Pro's IP** on the gym router.
-2. **Create a scoped API key**: Homey web app → Settings → API Keys →
-   New API Key, device read + control permissions only. Shown once.
-3. **Add to `/home/pi/champ-bridge/.env`** (same posture as the InBody
-   key — it never leaves the Pi). `HOMEY_ADDRESS` must be the bare
-   origin — the bridge refuses to start if it carries a path (the
-   classic mis-paste is the Homey web-app URL):
-
-   ```
-   TAPO_ENABLED=1
-   HOMEY_ADDRESS=http://192.168.1.50
-   HOMEY_API_KEY=xxxxxxxx
-   # TAPO_POLL_MS=15000
-   ```
-
-4. `sudo systemctl restart champ-bridge` then
-   `sudo journalctl -u champ-bridge -f` — expect
-   `tapo reconcile enabled` with the Homey address.
-5. In the CRM, `/automations/devices` fills with every switchable
-   Homey device (auto-registered **disabled**); enable + schedule the
-   ones you want.
-
-Keep Tapo firmware auto-update **OFF** in the Tapo app until Homey's
-Tapo integration confirms support for a new firmware — TP-Link's
-protocol changes now break Homey's link, not ours, but a broken link
-still means unreachable devices.
-
-### On-site verification order (exit gate)
-
-Verify on real hardware in this order — **plugs first**:
-
-1. Confirm a **plug** follows a CRM schedule and a manual CRM toggle
-   (watch it switch, watch the dot go green in the devices UI).
-2. **Bathroom lighting stays on manual control** until the
-   hub-paired S210/S220 switches are confirmed to actuate reliably
-   *through Homey* on real hardware (to the bridge they're just
-   another `onoff` device, but the sub-GHz hop is the untested link).
-   The mobile toggle + bathroom cutover follow after the plug gate
-   passes.
-
 ## Deploy
 
 systemd service runs as a non-root user; the noble `setcap` and the
