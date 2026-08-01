@@ -131,74 +131,40 @@ is URL-validated at startup and the token is shape-checked (`bbr_`
 prefix) — a mis-paste warns in the journal instead of 401-looping
 silently.
 
-## Tapo device control (optional)
+## Device control via Homey Pro (optional)
 
-The bridge can drive TP-Link **Tapo** smart plugs (and, later, hub
-switches) so the CRM's schedules turn studio kit on and off. Like the
-InBody fetcher, this needs a component on the Pi — the CRM never speaks
-Tapo. A small **localhost-only python-kasa sidecar** owns the Tapo
-credentials and device addressing; the bridge polls the CRM for
-directives and reconciles them against the sidecar every ~15s. The
-bridge stays off unless you set `TAPO_ENABLED=1`. Full sidecar detail
-(endpoints, smoke, troubleshooting) is in `sidecar/README.md`.
+The bridge can drive any on/off device paired to the studio's **Homey
+Pro** (today: the Tapo plugs/switches) on CRM-computed schedules with
+manual override from `/automations/devices`. Homey owns every vendor
+protocol; the bridge speaks only Homey's local REST API. Off unless
+`TAPO_ENABLED=1`. Design: `docs/superpowers/specs/2026-08-01-homey-actuation-design.md`.
 
-1. **Install the sidecar** (Python 3.11+, in `~/champ-bridge/sidecar`):
-   ```sh
-   cd ~/champ-bridge/sidecar
-   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-   ```
-2. **Create `sidecar/.env`** and lock it down — it holds the Tapo
-   business-account credentials, which stay on the Pi (same rule as the
-   InBody key):
-   ```
-   TAPO_USERNAME=tapo@un1tdublin.com
-   TAPO_PASSWORD=xxxxxxxx
-   TAPO_HOSTS=192.168.1.40,192.168.1.41
-   ```
-   ```sh
-   chmod 600 ~/champ-bridge/sidecar/.env
-   ```
+1. **DHCP-reserve the Homey Pro's IP** on the gym router.
+2. **Create a scoped API key**: Homey web app → Settings → API Keys →
+   New API Key, device read + control permissions only. Shown once.
+3. **Add to `/home/pi/champ-bridge/.env`** (same posture as the InBody
+   key — it never leaves the Pi). `HOMEY_ADDRESS` must be the bare
+   origin — the bridge refuses to start if it carries a path (the
+   classic mis-paste is the Homey web-app URL):
 
-   | Env var | Default | Purpose |
-   |---|---|---|
-   | `TAPO_USERNAME` | — (required) | Tapo business-account email |
-   | `TAPO_PASSWORD` | — (required) | Tapo business-account password |
-   | `TAPO_HOSTS` | — (discovery) | comma-separated IPs of plugs + hub(s); DHCP-reserve them (broadcast discovery is a fallback only) |
-   | `TAPO_SIDECAR_PORT` | 8127 | localhost port the sidecar listens on |
-   | `TAPO_REFRESH_S` | 10 | device poll interval (seconds) |
-
-3. **Enable it in the bridge `.env`** — add to `~/champ-bridge/.env`:
    ```
    TAPO_ENABLED=1
-   # optional, defaults shown:
-   # TAPO_SIDECAR_URL=http://127.0.0.1:8127
+   HOMEY_ADDRESS=http://192.168.1.50
+   HOMEY_API_KEY=xxxxxxxx
    # TAPO_POLL_MS=15000
    ```
-4. **Install both systemd units** (the sidecar is separate from the
-   bridge so it restarts independently):
-   ```sh
-   sudo cp deploy/champ-tapo-sidecar.service /etc/systemd/system/
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now champ-tapo-sidecar
-   sudo systemctl restart champ-bridge   # picks up TAPO_ENABLED=1
-   ```
-5. **Smoke both units**:
-   ```sh
-   sudo journalctl -u champ-tapo-sidecar -f   # expect "listening" + device refreshes
-   sudo journalctl -u champ-bridge -f         # expect "tapo reconcile enabled"
-   ```
 
-### Per-device Tapo-app prep (mandatory)
+4. `sudo systemctl restart champ-bridge` then
+   `sudo journalctl -u champ-bridge -f` — expect
+   `tapo reconcile enabled` with the Homey address.
+5. In the CRM, `/automations/devices` fills with every switchable
+   Homey device (auto-registered **disabled**); enable + schedule the
+   ones you want.
 
-TP-Link breaks local control across firmware waves, so pin every device
-before you rely on it. In the Tapo app, per device:
-
-- **Pin the firmware** and **turn auto-update OFF** — a silent firmware
-  bump can drop local (KLAP) control overnight.
-- **Enable "Third-Party Compatibility"** — without it the local
-  handshake fails.
-- **Give it a DHCP reservation** on the gym router and list that IP in
-  `TAPO_HOSTS` — discovery-by-broadcast is a fragile fallback.
+Keep Tapo firmware auto-update **OFF** in the Tapo app until Homey's
+Tapo integration confirms support for a new firmware — TP-Link's
+protocol changes now break Homey's link, not ours, but a broken link
+still means unreachable devices.
 
 ### On-site verification order (T2 exit gate)
 
