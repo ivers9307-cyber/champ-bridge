@@ -59,7 +59,7 @@ export async function runTapoCycle(state, deps) {
       state.directives = null
     }
 
-    // 2. Actuals from the sidecar (both reads in parallel — localhost, cheap).
+    // 2. Actuals from Homey (single GET shared by both reads).
     let devices = []
     let states = null
     try {
@@ -67,11 +67,11 @@ export async function runTapoCycle(state, deps) {
       if (devRes.ok) devices = devRes.body?.devices || []
       if (stateRes.ok) states = stateRes.body?.devices || null
     } catch (err) {
-      logWarn('tapo', 'sidecar read threw', { err })
+      logWarn('tapo', 'homey read threw', { err })
     }
     if (!states) {
       res.sidecarDown = true
-      logWarn('tapo', 'sidecar unreachable — skipping reconcile + report')
+      logWarn('tapo', 'homey unreachable — skipping reconcile + report')
       return res
     }
 

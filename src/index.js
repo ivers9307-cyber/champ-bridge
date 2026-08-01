@@ -154,7 +154,7 @@ async function main() {
     const tapoTick = () => runTapoCycle(tapoState, realTapoDeps).catch((err) => logWarn('tapo', 'cycle threw', { err }))
     tapoTick() // kick once on boot, then on the poll interval — power-loss
     // recovery must reconcile within one tick, not pollMs later. Fire-and-
-    // forget: startup never blocks on a sidecar round-trip.
+    // forget: startup never blocks on a Homey round-trip.
     tapoTimer = setInterval(tapoTick, config.tapoPollMs)
   }
 
