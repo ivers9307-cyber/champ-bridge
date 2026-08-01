@@ -166,16 +166,18 @@ Tapo integration confirms support for a new firmware — TP-Link's
 protocol changes now break Homey's link, not ours, but a broken link
 still means unreachable devices.
 
-### On-site verification order (T2 exit gate)
+### On-site verification order (exit gate)
 
 Verify on real hardware in this order — **plugs first**:
 
 1. Confirm a **plug** follows a CRM schedule and a manual CRM toggle
    (watch it switch, watch the dot go green in the devices UI).
-2. **S210/S220 bathroom switches stay in the box** until hub-child
-   control is confirmed working on real hardware. That confirmation is
-   the **Wave T3** gate — the mobile toggle + bathroom cutover are a
-   separate plan that only starts after the plug gate passes.
+2. **Bathroom lighting stays on manual control** until the
+   hub-paired S210/S220 switches are confirmed to actuate reliably
+   *through Homey* on real hardware (to the bridge they're just
+   another `onoff` device, but the sub-GHz hop is the untested link).
+   The mobile toggle + bathroom cutover follow after the plug gate
+   passes.
 
 ## Deploy
 
