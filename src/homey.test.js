@@ -69,3 +69,36 @@ describe('mapHomeyStates', () => {
     expect(mapHomeyStates({ x: null, y: 42, z: { name: 'no id' } })).toEqual([])
   })
 })
+
+const { createHomeyActuation } = await import('./homey.js')
+
+describe('createHomeyActuation', () => {
+  const cfg = { address: 'http://192.168.1.50', apiKey: 'key-1' }
+
+  it('shares ONE GET between concurrent device+state reads, refetches next tick', async () => {
+    const requestJson = vi.fn(async () => ({ ok: true, statusCode: 200, body: homeyRaw }))
+    const a = createHomeyActuation({ ...cfg, requestJson })
+    const [dev, st] = await Promise.all([a.getDevices(), a.getState()])
+    expect(requestJson).toHaveBeenCalledTimes(1)
+    expect(requestJson).toHaveBeenCalledWith('GET', 'http://192.168.1.50/api/manager/devices/device', 'key-1', undefined)
+    expect(dev.body.devices).toHaveLength(2)
+    expect(st.body.devices[0]).toEqual({ id: 'homey:abc-1', state: 'on', reachable: true })
+    await a.getState() // after settle → fresh fetch
+    expect(requestJson).toHaveBeenCalledTimes(2)
+  })
+
+  it('passes a failed GET through untouched (drives sidecarDown path)', async () => {
+    const fail = { ok: false, statusCode: 0, networkError: true }
+    const a = createHomeyActuation({ ...cfg, requestJson: vi.fn(async () => fail) })
+    expect(await a.getState()).toBe(fail)
+  })
+
+  it('setPower strips the homey: prefix and PUTs the onoff capability', async () => {
+    const requestJson = vi.fn(async () => ({ ok: true, statusCode: 200, body: {} }))
+    const a = createHomeyActuation({ ...cfg, requestJson })
+    await a.setPower('homey:abc-1', true)
+    expect(requestJson).toHaveBeenCalledWith(
+      'PUT', 'http://192.168.1.50/api/manager/devices/device/abc-1/capability/onoff', 'key-1', { value: true },
+    )
+  })
+})

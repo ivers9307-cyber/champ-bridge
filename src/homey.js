@@ -43,3 +43,34 @@ export function mapHomeyStates(raw) {
     return { id: HOMEY_PREFIX + d.id, state, reachable }
   })
 }
+
+// Actuation deps for runTapoCycle. One GET per tick: concurrent reads share
+// the in-flight request (cleared on settle → next tick refetches).
+export function createHomeyActuation({ address, apiKey, requestJson }) {
+  let inflight = null
+  const snapshot = () => {
+    if (!inflight) {
+      inflight = requestJson('GET', `${address}/api/manager/devices/device`, apiKey, undefined)
+        .finally(() => { inflight = null })
+    }
+    return inflight
+  }
+  const read = (mapper) => async () => {
+    const r = await snapshot()
+    if (!r.ok) return r
+    return { ok: true, statusCode: r.statusCode, body: { devices: mapper(r.body) } }
+  }
+  return {
+    getDevices: read(mapHomeyDevices),
+    getState: read(mapHomeyStates),
+    setPower: (id, on) => {
+      const realId = id.startsWith(HOMEY_PREFIX) ? id.slice(HOMEY_PREFIX.length) : id
+      return requestJson(
+        'PUT',
+        `${address}/api/manager/devices/device/${encodeURIComponent(realId)}/capability/onoff`,
+        apiKey,
+        { value: on },
+      )
+    },
+  }
+}
