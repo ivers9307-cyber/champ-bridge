@@ -1,6 +1,6 @@
 // homey.js — Homey Pro local-API actuation for the tapo reconcile cycle.
 //
-// Replaces the python-kasa sidecar (removed later in this branch; see spec 2026-08-01). The
+// Replaces the python-kasa sidecar (removed in this branch; see spec 2026-08-01). The
 // Homey Pro owns every vendor protocol; we speak only its local REST API:
 //   GET /api/manager/devices/device                      (all devices + live values)
 //   PUT /api/manager/devices/device/{id}/capability/onoff {"value": bool}

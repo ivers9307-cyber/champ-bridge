@@ -42,9 +42,9 @@ Unchanged: `tapo.js` cycle (directive cache w/ 26h ceiling, reentrancy guard, me
 Implements the three injected deps `realTapoDeps` currently points at the sidecar:
 
 - **One GET per tick** of the full device list; both dep reads (`getSidecarDevices` / `getSidecarState` slots) are served from that single fetch (the two slots share one in-flight promise per tick — the cycle calls them via `Promise.all`, so a naive implementation would double-fetch a chunky payload for no reason).
-- **Filter:** devices whose `capabilitiesObj` contains `onoff`. Everything else is invisible to the bridge.
+- **Filter:** devices advertising `onoff` — the `capabilities` array is authoritative when present (an empty array excludes, even if `capabilitiesObj.onoff` exists); `capabilitiesObj` is the fallback when the array is absent. Everything else is invisible to the bridge.
 - **Device shape:** `{ id: 'homey:<homey-device-id>', kind, name_hint }` — `kind` maps Homey `class` `socket` → `plug`, anything else → `switch` (CRM column constraint). `name_hint` = Homey device name.
-- **State shape:** `{ id, state: 'on'|'off'|null, reachable }` — `state` from `capabilitiesObj.onoff.value`, `null` when `available === false`; `reachable` = `available`.
+- **State shape:** `{ id, state: 'on'|'off'|null, reachable }` — `state` from `capabilitiesObj.onoff.value` (strictly boolean, else `null` — never guessed), `null` when unavailable; `reachable` = `available !== false` (missing `available` counts as reachable).
 - **Command:** strip the `homey:` prefix, `PUT .../capability/onoff`. Idempotent; failures logged + counted, retried next tick (existing cycle behaviour).
 - Same never-throw `{ok, statusCode, body}` result shape as the old `sidecarJson`, 5s headers/body timeouts.
 

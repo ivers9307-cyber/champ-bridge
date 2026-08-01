@@ -62,16 +62,20 @@ export async function runTapoCycle(state, deps) {
     // 2. Actuals from Homey (single GET shared by both reads).
     let devices = []
     let states = null
+    let stateStatus = null
     try {
       const [devRes, stateRes] = await Promise.all([deps.getSidecarDevices(), deps.getSidecarState()])
       if (devRes.ok) devices = devRes.body?.devices || []
       if (stateRes.ok) states = stateRes.body?.devices || null
+      stateStatus = stateRes?.statusCode ?? null
     } catch (err) {
       logWarn('tapo', 'homey read threw', { err })
     }
     if (!states) {
       res.sidecarDown = true
-      logWarn('tapo', 'homey unreachable — skipping reconcile + report')
+      // statusCode disambiguates at the on-site gate: 401 = bad/rotated
+      // API key, 0/null = Homey off the LAN entirely.
+      logWarn('tapo', 'homey unreachable — skipping reconcile + report', { statusCode: stateStatus })
       return res
     }
 
