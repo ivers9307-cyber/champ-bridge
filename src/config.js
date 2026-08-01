@@ -115,12 +115,13 @@ if (!tokenLooksValid(process.env.CHAMP_BRIDGE_TOKEN)) {
 export function homeyConfigError(env) {
   if (env.TAPO_ENABLED !== '1') return null
   if (!env.HOMEY_ADDRESS) return 'TAPO_ENABLED=1 requires HOMEY_ADDRESS'
-  if (!env.HOMEY_API_KEY) return 'TAPO_ENABLED=1 requires HOMEY_API_KEY'
+  if (!env.HOMEY_API_KEY || !env.HOMEY_API_KEY.trim()) return 'TAPO_ENABLED=1 requires HOMEY_API_KEY'
   let u
   try { u = new URL(env.HOMEY_ADDRESS) } catch {
     return `HOMEY_ADDRESS is not a valid URL: ${env.HOMEY_ADDRESS}`
   }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return `HOMEY_ADDRESS must be http(s): ${env.HOMEY_ADDRESS}`
+  if (u.pathname !== '/' || u.search || u.hash) return `HOMEY_ADDRESS must be just the origin, e.g. http://192.168.1.50 — got: ${env.HOMEY_ADDRESS}`
   return null
 }
 
@@ -129,6 +130,14 @@ if (homeyErr) {
   // eslint-disable-next-line no-console
   console.error(`[champ-bridge] ${homeyErr}`)
   process.exit(1)
+}
+
+// Normalise HOMEY_ADDRESS to its origin so the validator (which rejects
+// path-bearing addresses) and the stored value can't diverge. Must not throw
+// when device control is disabled and the address is missing/junk.
+function homeyOrigin(raw) {
+  if (!raw) return null
+  try { return new URL(raw).origin } catch { return null }
 }
 
 export const config = {
@@ -163,9 +172,9 @@ export const config = {
   get inbodyEnabled() { return !!(this.inbodyApiKey && this.inbodyAccount) },
   // Tapo device control (Wave T2) — OFF unless explicitly enabled.
   tapoEnabled: process.env.TAPO_ENABLED === '1',
-  homeyAddress: (process.env.HOMEY_ADDRESS || '').replace(/\/+$/, '') || null,
-  homeyApiKey: process.env.HOMEY_API_KEY || null,
+  homeyAddress: homeyOrigin(process.env.HOMEY_ADDRESS),
+  homeyApiKey: (process.env.HOMEY_API_KEY || '').trim() || null,
   // Clamped like every other interval — a typo'd env (NaN → 0-delay
-  // setInterval) must not busy-loop against the CRM + sidecar.
+  // setInterval) must not busy-loop against the CRM + Homey Pro.
   tapoPollMs: clampInterval(process.env.TAPO_POLL_MS, 15_000, 5_000),
 }

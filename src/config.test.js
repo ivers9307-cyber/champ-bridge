@@ -8,8 +8,14 @@ process.env.CHAMP_API_URL = process.env.CHAMP_API_URL || 'http://localhost:3000'
 // Garbage on purpose — proves the tapo poll interval is clamp-wired (a typo'd
 // env must fall back to the default, not become a 0-delay busy-loop).
 process.env.TAPO_POLL_MS = 'garbage'
+// Immunise against a dev shell that already exports TAPO_ENABLED=1 — the
+// import-time fail-fast guard below would exit the whole test process.
+delete process.env.TAPO_ENABLED
+// Set before import so config.homeyAddress wiring (origin-normalised, via
+// homeyOrigin) can be pinned below without enabling the reconcile loop.
+process.env.HOMEY_ADDRESS = 'http://192.168.1.50/'
 
-const { readPackageVersion, clampInterval, tokenLooksValid, config } = await import('./config.js')
+const { readPackageVersion, clampInterval, tokenLooksValid, config, homeyConfigError } = await import('./config.js')
 
 describe('readPackageVersion', () => {
   it('reads the real version from package.json (not the npm env fallback)', () => {
@@ -69,22 +75,37 @@ describe('tokenLooksValid', () => {
   })
 })
 
-const { homeyConfigError } = await import('./config.js')
-
 describe('homeyConfigError', () => {
   it('is null when tapo control is disabled, whatever else is set', () => {
     expect(homeyConfigError({})).toBe(null)
     expect(homeyConfigError({ HOMEY_ADDRESS: 'nonsense' })).toBe(null)
   })
+  it('is null for anything other than the strict string "1" (pins the strict contract)', () => {
+    expect(homeyConfigError({ TAPO_ENABLED: 'true', HOMEY_ADDRESS: 'nonsense' })).toBe(null)
+  })
   it('requires both HOMEY vars when TAPO_ENABLED=1', () => {
     expect(homeyConfigError({ TAPO_ENABLED: '1' })).toMatch(/HOMEY_ADDRESS/)
+    expect(homeyConfigError({ TAPO_ENABLED: '1', HOMEY_ADDRESS: '' })).toMatch(/HOMEY_ADDRESS/)
     expect(homeyConfigError({ TAPO_ENABLED: '1', HOMEY_ADDRESS: 'http://192.168.1.50' })).toMatch(/HOMEY_API_KEY/)
+  })
+  it('rejects a missing / whitespace-only HOMEY_API_KEY', () => {
+    expect(homeyConfigError({ TAPO_ENABLED: '1', HOMEY_ADDRESS: 'http://192.168.1.50', HOMEY_API_KEY: '   ' })).toMatch(/HOMEY_API_KEY/)
   })
   it('rejects a non-http(s) or unparseable address', () => {
     expect(homeyConfigError({ TAPO_ENABLED: '1', HOMEY_ADDRESS: '192.168.1.50', HOMEY_API_KEY: 'k' })).toMatch(/valid URL/)
     expect(homeyConfigError({ TAPO_ENABLED: '1', HOMEY_ADDRESS: 'ftp://x', HOMEY_API_KEY: 'k' })).toMatch(/http/)
   })
-  it('accepts a good pair', () => {
+  it('rejects a path-bearing or query-bearing address (web-app URL mis-paste)', () => {
+    expect(homeyConfigError({ TAPO_ENABLED: '1', HOMEY_ADDRESS: 'http://192.168.1.50/api', HOMEY_API_KEY: 'k' })).toMatch(/just the origin/)
+    expect(homeyConfigError({ TAPO_ENABLED: '1', HOMEY_ADDRESS: 'http://x/?a=b', HOMEY_API_KEY: 'k' })).toMatch(/just the origin/)
+  })
+  it('accepts a good pair, including https and a bare-origin trailing slash', () => {
     expect(homeyConfigError({ TAPO_ENABLED: '1', HOMEY_ADDRESS: 'http://192.168.1.50', HOMEY_API_KEY: 'k' })).toBe(null)
+    expect(homeyConfigError({ TAPO_ENABLED: '1', HOMEY_ADDRESS: 'https://192.168.1.50', HOMEY_API_KEY: 'k' })).toBe(null)
+    expect(homeyConfigError({ TAPO_ENABLED: '1', HOMEY_ADDRESS: 'http://192.168.1.50/', HOMEY_API_KEY: 'k' })).toBe(null)
+  })
+  it('config.homeyAddress is origin-normalised (trailing slash stripped via homeyOrigin)', () => {
+    // HOMEY_ADDRESS is set to 'http://192.168.1.50/' before config.js is imported.
+    expect(config.homeyAddress).toBe('http://192.168.1.50')
   })
 })
