@@ -18,7 +18,7 @@
 - Create: `src/homey.js`
 - Test: `src/homey.test.js`
 
-Homey's `GET /api/manager/devices/device` returns a JSON **object keyed by device id** (each value has `id`, `name`, `class`, `available`, `driverId`, `capabilities` array, `capabilitiesObj.onoff.value`). The mappers accept an object map or array defensively and produce exactly the shapes `tapo-logic.js` consumes (`buildStateReport` reads `id`/`kind`/`name_hint` from devices, `id`/`state`/`reachable` from states; `diffCommands` matches on `id`).
+Homey's `GET /api/manager/devices/device` returns a JSON **object keyed by device id** (each value has `id`, `name`, `class`, `available`, `driverId`, `capabilities` array, `capabilitiesObj.onoff.value`). The mappers accept an object map or array defensively and produce exactly the shapes `tapo-logic.js` consumes (`buildStateReport` reads `id`/`kind`/`name_hint` from devices, `id`/`state`/`reachable` from states; `diffCommands` matches on `id`). `model` was dropped in review (HOMEY.1b) — buildStateReport never forwards it.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -54,8 +54,8 @@ const homeyRaw = {
 describe('mapHomeyDevices', () => {
   it('filters to onoff devices, prefixes ids, maps socket→plug else switch', () => {
     expect(mapHomeyDevices(homeyRaw)).toEqual([
-      { id: 'homey:abc-1', kind: 'plug', name_hint: 'Front TVs', model: 'homey:app:com.tplink.tapo:plug' },
-      { id: 'homey:abc-2', kind: 'switch', name_hint: 'Bathroom light', model: 'homey:app:com.tplink.tapo:switch' },
+      { id: 'homey:abc-1', kind: 'plug', name_hint: 'Front TVs' },
+      { id: 'homey:abc-2', kind: 'switch', name_hint: 'Bathroom light' },
     ])
   })
   it('tolerates arrays, null, junk entries', () => {
@@ -113,12 +113,11 @@ const hasOnoff = (d) =>
 const controllable = (raw) =>
   homeyDeviceList(raw).filter((d) => d && typeof d.id === 'string' && d.id && hasOnoff(d))
 
-// → [{ id, kind, name_hint?, model? }] for buildStateReport metadata + adopt.
+// → [{ id, kind, name_hint? }] for buildStateReport metadata + adopt.
 export function mapHomeyDevices(raw) {
   return controllable(raw).map((d) => {
     const row = { id: HOMEY_PREFIX + d.id, kind: d.class === 'socket' ? 'plug' : 'switch' }
     if (d.name) row.name_hint = String(d.name)
-    if (d.driverId) row.model = String(d.driverId)
     return row
   })
 }
