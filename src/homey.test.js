@@ -1,6 +1,7 @@
 // src/homey.test.js — pure mappers + actuation factory (no network).
 import { describe, it, expect, vi } from 'vitest'
 
+// homey.js never imports config.js, but keep the house env-before-import pattern in case that changes.
 process.env.CHAMP_BRIDGE_TOKEN = process.env.CHAMP_BRIDGE_TOKEN || 'bbr_test'
 process.env.CHAMP_API_URL = process.env.CHAMP_API_URL || 'http://localhost:3000'
 
@@ -29,14 +30,26 @@ const homeyRaw = {
 describe('mapHomeyDevices', () => {
   it('filters to onoff devices, prefixes ids, maps socket→plug else switch', () => {
     expect(mapHomeyDevices(homeyRaw)).toEqual([
-      { id: 'homey:abc-1', kind: 'plug', name_hint: 'Front TVs', model: 'homey:app:com.tplink.tapo:plug' },
-      { id: 'homey:abc-2', kind: 'switch', name_hint: 'Bathroom light', model: 'homey:app:com.tplink.tapo:switch' },
+      { id: 'homey:abc-1', kind: 'plug', name_hint: 'Front TVs' },
+      { id: 'homey:abc-2', kind: 'switch', name_hint: 'Bathroom light' },
     ])
   })
   it('tolerates arrays, null, junk entries', () => {
     expect(mapHomeyDevices(Object.values(homeyRaw))).toHaveLength(2)
     expect(mapHomeyDevices(null)).toEqual([])
     expect(mapHomeyDevices({ x: null, y: 42, z: { name: 'no id' } })).toEqual([])
+  })
+  it('falls back to capabilitiesObj.onoff when capabilities array is absent', () => {
+    const raw = { a: { id: 'a', class: 'socket', capabilitiesObj: { onoff: { value: true } } } }
+    expect(mapHomeyDevices(raw)).toEqual([{ id: 'homey:a', kind: 'plug' }])
+  })
+  it('an empty capabilities array excludes the device even if capabilitiesObj.onoff is present', () => {
+    const raw = { a: { id: 'a', class: 'socket', capabilities: [], capabilitiesObj: { onoff: { value: true } } } }
+    expect(mapHomeyDevices(raw)).toEqual([])
+  })
+  it('omits name_hint when the device has no name', () => {
+    const raw = { a: { id: 'a', class: 'socket', available: true, capabilities: ['onoff'], capabilitiesObj: { onoff: { value: true } } } }
+    expect(mapHomeyDevices(raw)).toEqual([{ id: 'homey:a', kind: 'plug' }])
   })
 })
 
@@ -50,5 +63,9 @@ describe('mapHomeyStates', () => {
   it('non-boolean onoff value → state null (never guess)', () => {
     const raw = { a: { id: 'a', class: 'socket', available: true, capabilities: ['onoff'], capabilitiesObj: { onoff: { value: null } } } }
     expect(mapHomeyStates(raw)).toEqual([{ id: 'homey:a', state: null, reachable: true }])
+  })
+  it('tolerates null and junk entries', () => {
+    expect(mapHomeyStates(null)).toEqual([])
+    expect(mapHomeyStates({ x: null, y: 42, z: { name: 'no id' } })).toEqual([])
   })
 })
