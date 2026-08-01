@@ -5,7 +5,7 @@ import { describe, it, expect, vi } from 'vitest'
 process.env.CHAMP_BRIDGE_TOKEN = process.env.CHAMP_BRIDGE_TOKEN || 'bbr_test'
 process.env.CHAMP_API_URL = process.env.CHAMP_API_URL || 'http://localhost:3000'
 
-const { mapHomeyDevices, mapHomeyStates } = await import('./homey.js')
+const { mapHomeyDevices, mapHomeyStates, createHomeyActuation } = await import('./homey.js')
 
 // Realistic slice of Homey's object-map response.
 const homeyRaw = {
@@ -70,8 +70,6 @@ describe('mapHomeyStates', () => {
   })
 })
 
-const { createHomeyActuation } = await import('./homey.js')
-
 describe('createHomeyActuation', () => {
   const cfg = { address: 'http://192.168.1.50', apiKey: 'key-1' }
 
@@ -93,12 +91,33 @@ describe('createHomeyActuation', () => {
     expect(await a.getState()).toBe(fail)
   })
 
+  it('a thrown first fetch clears the in-flight slot too — next call refetches instead of caching a rejection forever', async () => {
+    const requestJson = vi.fn()
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValueOnce({ ok: true, statusCode: 200, body: homeyRaw })
+    const a = createHomeyActuation({ ...cfg, requestJson })
+    await expect(Promise.all([a.getDevices(), a.getState()])).rejects.toThrow('boom')
+    expect(requestJson).toHaveBeenCalledTimes(1)
+    const st = await a.getState() // in-flight was cleared on the rejection → fresh fetch, succeeds
+    expect(requestJson).toHaveBeenCalledTimes(2)
+    expect(st.body.devices[0]).toEqual({ id: 'homey:abc-1', state: 'on', reachable: true })
+  })
+
   it('setPower strips the homey: prefix and PUTs the onoff capability', async () => {
     const requestJson = vi.fn(async () => ({ ok: true, statusCode: 200, body: {} }))
     const a = createHomeyActuation({ ...cfg, requestJson })
     await a.setPower('homey:abc-1', true)
     expect(requestJson).toHaveBeenCalledWith(
       'PUT', 'http://192.168.1.50/api/manager/devices/device/abc-1/capability/onoff', 'key-1', { value: true },
+    )
+  })
+
+  it('setPower passes an un-prefixed id through as-is and forwards value: false', async () => {
+    const requestJson = vi.fn(async () => ({ ok: true, statusCode: 200, body: {} }))
+    const a = createHomeyActuation({ ...cfg, requestJson })
+    await a.setPower('abc-9', false)
+    expect(requestJson).toHaveBeenCalledWith(
+      'PUT', 'http://192.168.1.50/api/manager/devices/device/abc-9/capability/onoff', 'key-1', { value: false },
     )
   })
 })

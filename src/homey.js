@@ -44,8 +44,9 @@ export function mapHomeyStates(raw) {
   })
 }
 
-// Actuation deps for runTapoCycle. One GET per tick: concurrent reads share
-// the in-flight request (cleared on settle → next tick refetches).
+// Actuation deps for runTapoCycle. Concurrent reads share one in-flight GET
+// (the cycle reads both slots via Promise.all); cleared on settle so the
+// next tick refetches.
 export function createHomeyActuation({ address, apiKey, requestJson }) {
   let inflight = null
   const snapshot = () => {
