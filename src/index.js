@@ -16,7 +16,6 @@ import { createStrapSource } from './strap-source.js'
 import { pushSample, startFlushLoop, pendingCount, flushSamples } from './buffer.js'
 import { postHeartbeat, postScan } from './api.js'
 import { runInbodyCycle, runInbodyBackfillCycle, loadInbodyState } from './inbody.js'
-import { runTapoCycle, newTapoState, realTapoDeps } from './tapo.js'
 import { notifyReady, notifyWatchdog, notifyStopping, watchdogPingMs } from './sd-notify.js'
 
 // Crash safety net. Without these an uncaught exception / unhandled
@@ -143,21 +142,6 @@ async function main() {
     inbodyTimer = setInterval(inbodyTick, config.inbodyPollMs)
   }
 
-  // Tapo reconcile loop — only when TAPO_ENABLED=1. Poll the CRM for device
-  // directives, reads actuals from the Homey Pro's local API, applies diffs,
-  // and reports state back. The Homey API key stays in the Pi's env. The
-  // directive cache lives in memory only (this repo is stateless by design).
-  let tapoTimer = null
-  if (config.tapoEnabled) {
-    const tapoState = newTapoState()
-    logInfo('tapo', 'tapo reconcile enabled', { homey: config.homeyAddress, pollMs: config.tapoPollMs })
-    const tapoTick = () => runTapoCycle(tapoState, realTapoDeps).catch((err) => logWarn('tapo', 'cycle threw', { err }))
-    tapoTick() // kick once on boot, then on the poll interval — power-loss
-    // recovery must reconcile within one tick, not pollMs later. Fire-and-
-    // forget: startup never blocks on a Homey round-trip.
-    tapoTimer = setInterval(tapoTick, config.tapoPollMs)
-  }
-
   // Graceful shutdown. systemd sends SIGTERM on stop; we want to
   // disconnect from straps cleanly before exiting so the next start
   // doesn't hit lingering connections. A once-guard stops a double
@@ -174,9 +158,6 @@ async function main() {
     clearInterval(scanTimer)
     clearInterval(heartbeatTimer)
     if (inbodyTimer) clearInterval(inbodyTimer)
-    // An in-flight tapo cycle is intentionally abandoned at SIGTERM
-    // (best-effort, matches the inbody precedent) — next boot reconciles.
-    if (tapoTimer) clearInterval(tapoTimer)
     await straps.stop().catch(() => {})
     // Drain the buffer one last time so a clean restart/deploy doesn't
     // drop the samples collected since the last flush tick.

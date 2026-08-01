@@ -150,23 +150,6 @@ export async function postInbodyBackfillIngest(payload) {
 }
 
 /**
- * Tapo device control (Wave T2) — fetch the CRM's computed directives for the
- * current tick. Returns { ok, body?: { success, date, devices: [...] } }.
- */
-export async function getTapoDirectives() {
-  return getJson('/api/bridge/tapo/directives')
-}
-
-/**
- * Tapo device control — report actual device state + reachability back to the
- * CRM (drives last_seen_at + the auto-register adopt flow). Max 200 rows.
- * @param {Array<{ sidecar_device_id: string, kind?: string, state: 'on'|'off'|null, reachable?: boolean, name_hint?: string }>} devices
- */
-export async function postTapoState(devices) {
-  return postJson('/api/bridge/tapo/state', { devices })
-}
-
-/**
  * Send a batch of samples. Server caps at 1000 per request so the
  * caller (samples-buffer) splits if needed.
  *
