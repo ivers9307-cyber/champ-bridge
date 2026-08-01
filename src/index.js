@@ -144,13 +144,13 @@ async function main() {
   }
 
   // Tapo reconcile loop — only when TAPO_ENABLED=1. Poll the CRM for device
-  // directives, read actuals from the localhost python-kasa sidecar, apply
-  // diffs, and report state back. The sidecar owns the Tapo credentials. The
+  // directives, reads actuals from the Homey Pro's local API, applies diffs,
+  // and reports state back. The Homey API key stays in the Pi's env. The
   // directive cache lives in memory only (this repo is stateless by design).
   let tapoTimer = null
   if (config.tapoEnabled) {
     const tapoState = newTapoState()
-    logInfo('tapo', 'tapo reconcile enabled', { sidecar: config.tapoSidecarUrl, pollMs: config.tapoPollMs })
+    logInfo('tapo', 'tapo reconcile enabled', { homey: config.homeyAddress, pollMs: config.tapoPollMs })
     const tapoTick = () => runTapoCycle(tapoState, realTapoDeps).catch((err) => logWarn('tapo', 'cycle threw', { err }))
     tapoTick() // kick once on boot, then on the poll interval — power-loss
     // recovery must reconcile within one tick, not pollMs later. Fire-and-

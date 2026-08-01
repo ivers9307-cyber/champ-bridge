@@ -5,11 +5,11 @@
 //      in memory (this repo is stateless by design — no file cache; a
 //      power-cycle during a CRM outage means unmanaged devices until
 //      the CRM returns, and the Tapo app is the manual fallback).
-//   2. Read actuals from the sidecar (localhost). Sidecar down → skip
+//   2. Read actuals from the Homey Pro (LAN, local REST). Homey down → skip
 //      commanding AND reporting (CRM last_seen goes stale → amber/red
 //      dots in the devices UI; that staleness IS the failure signal).
-//   3. diffCommands → POST /device/{id}/state to the sidecar per
-//      mismatch (idempotent; failures logged, retried next tick).
+//   3. diffCommands → PUT capability/onoff on Homey per mismatch
+//      (idempotent; failures logged, retried next tick).
 //   4. buildStateReport → POST /api/bridge/tapo/state (drives
 //      last_state/last_seen_at and the auto-register adopt flow).
 //
@@ -111,31 +111,21 @@ export async function runTapoCycle(state, deps) {
 // ——— real deps (index.js) ———
 
 import { getTapoDirectives, postTapoState } from './api.js'
-import { request } from 'undici'
+import { createHomeyActuation, homeyRequestJson } from './homey.js'
 
-async function sidecarJson(method, path, body) {
-  try {
-    const r = await request(config.tapoSidecarUrl + path, {
-      method,
-      headers: body ? { 'content-type': 'application/json' } : undefined,
-      body: body ? JSON.stringify(body) : undefined,
-      headersTimeout: 5000,
-      bodyTimeout: 5000,
-    })
-    const text = await r.body.text()
-    let parsed = null
-    try { parsed = text ? JSON.parse(text) : null } catch { /* non-JSON */ }
-    return { ok: r.statusCode >= 200 && r.statusCode < 300, statusCode: r.statusCode, body: parsed }
-  } catch (err) {
-    return { ok: false, statusCode: 0, networkError: true, err }
-  }
-}
+const homey = createHomeyActuation({
+  address: config.homeyAddress,
+  apiKey: config.homeyApiKey,
+  requestJson: homeyRequestJson,
+})
 
+// Dep slot names keep the sidecar-era contract (accepted debt, spec
+// 2026-08-01) — the cycle and its tests are backend-agnostic.
 export const realTapoDeps = {
   getDirectives: getTapoDirectives,
-  getSidecarDevices: () => sidecarJson('GET', '/devices'),
-  getSidecarState: () => sidecarJson('GET', '/state'),
-  setSidecarPower: (id, on) => sidecarJson('POST', `/device/${encodeURIComponent(id)}/state`, { on }),
+  getSidecarDevices: homey.getDevices,
+  getSidecarState: homey.getState,
+  setSidecarPower: homey.setPower,
   postState: postTapoState,
   now: () => Date.now(),
 }
