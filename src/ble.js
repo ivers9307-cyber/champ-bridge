@@ -30,6 +30,7 @@ import { config } from './config.js'
 import { logInfo, logWarn, logDebug } from './log.js'
 import { canonicaliseMac, makeDeviceKey } from './device-key.js'
 import { parseHeartRateMeasurement } from './hrm.js'
+import { withTimeout, settleCallWithin } from './with-timeout.js'
 
 const HEART_RATE_SERVICE = '180d'
 const HEART_RATE_MEASUREMENT_CHAR = '2a37'
@@ -37,6 +38,15 @@ const HEART_RATE_MEASUREMENT_CHAR = '2a37'
 // A connectAsync() that never resolves parks a peripheral forever,
 // holding a maxConnections slot as a ghost. Cap the attempt.
 const CONNECT_TIMEOUT_MS = 15_000
+
+// Teardown bounds. `stopScanningAsync()` on an adapter that came up
+// `unauthorized` (the 2026-08-12 Pi state — noble had no CAP_NET_RAW) can sit
+// on a bluez call that never answers, and disconnecting up to maxConnections
+// peripherals one-at-a-time is unbounded by construction. Both are on the
+// SIGTERM path, so both are capped.
+const STOP_SCAN_TIMEOUT_MS = 1_500
+const DISCONNECT_TIMEOUT_MS = 1_500
+const STOP_TOTAL_TIMEOUT_MS = 3_500
 
 class FakeBle extends EventEmitter {
   constructor() {
@@ -154,7 +164,7 @@ class RealBle extends EventEmitter {
       // connectAsync can hang forever (holding a maxConnections slot as
       // a ghost). Race it against a timeout and treat a timeout as a
       // failed connect → clean up the slot.
-      await this._withTimeout(
+      await withTimeout(
         peripheral.connectAsync(),
         CONNECT_TIMEOUT_MS,
         `connect ${key}`,
@@ -205,24 +215,34 @@ class RealBle extends EventEmitter {
     }
   }
 
-  // Resolve the promise, or reject once ms elapses. On timeout we log
-  // and the caller's catch cleans up (disconnect + free the slot).
-  _withTimeout(promise, ms, label) {
-    let timer
-    const timeout = new Promise((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error(`timeout: ${label} (${ms}ms)`)), ms)
-    })
-    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
-  }
-
+  /**
+   * Bounded, non-hanging teardown.
+   *
+   * Was: `await stopScanningAsync()` then a SEQUENTIAL loop of
+   * `await disconnectAsync()` — an unbounded await chain sitting directly on
+   * the SIGTERM path. Now: every bluez call is time-boxed, the disconnects run
+   * in parallel, and the whole thing is capped again on the outside. Never
+   * throws; the connected map is cleared regardless of what bluez does.
+   */
   async stop() {
-    if (this._noble) {
-      await this._noble.stopScanningAsync().catch(() => {})
-      for (const { peripheral } of this.connected.values()) {
-        await peripheral.disconnectAsync().catch(() => {})
-      }
-    }
+    const noble = this._noble
+    const peripherals = Array.from(this.connected.values(), (s) => s.peripheral)
     this.connected.clear()
+    this._poweredOn = false
+
+    if (!noble) return
+    await settleCallWithin(async () => {
+      await settleCallWithin(
+        () => noble.stopScanningAsync(),
+        STOP_SCAN_TIMEOUT_MS,
+        'ble stopScanning',
+      )
+      await Promise.all(peripherals.map((p) => settleCallWithin(
+        () => p?.disconnectAsync(),
+        DISCONNECT_TIMEOUT_MS,
+        'ble disconnect',
+      )))
+    }, STOP_TOTAL_TIMEOUT_MS, 'ble stop')
   }
 
   getCurrentStraps() {
