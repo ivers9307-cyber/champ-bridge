@@ -77,6 +77,18 @@ ProtectHome=read-only
 ReadWritePaths=/home/pi/champ-bridge
 PrivateTmp=true
 NoNewPrivileges=true
+# BLE-CAPS.1 — noble needs a raw HCI socket to scan for heart-rate straps.
+# Without these the adapter comes up `unauthorized` and BLE straps are
+# NEVER seen, while ANT+ keeps working and the service looks perfectly
+# healthy (that combination hid the fault until 2026-08-12).
+#
+# Ambient capabilities are the ONLY mechanism that works here: NoNewPrivileges
+# above deliberately blocks file capabilities, so the usual noble remedy
+# (`setcap cap_net_raw+eip $(readlink -f $(which node))`) is silently
+# defeated by this unit. systemd grants ambient caps directly at exec, which
+# NoNewPrivileges does not prevent.
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
 # Cheap containment. The bridge only makes outbound HTTPS + talks to local
 # USB/Bluetooth, so cap memory and restrict socket families. AF_NETLINK is
 # needed by bluez; AF_UNIX by sd_notify + node internals.
