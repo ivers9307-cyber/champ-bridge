@@ -168,13 +168,32 @@ these once per Pi (all detailed in `deploy/champ-bridge.service`):
   # /etc/systemd/journald.conf:  Storage=persistent   SystemMaxUse=200M
   sudo systemctl restart systemd-journald
   ```
-- **systemd watchdog (optional, after on-Pi verification)** — the
-  sd_notify plumbing is wired (`READY=1` + periodic `WATCHDOG=1`), but
-  the unit ships `Type=simple`. To arm it: flip to `Type=notify` and
-  uncomment `WatchdogSec` + `NotifyAccess=all` in the unit, then
-  `daemon-reload` + restart. A wedged event loop then gets killed +
-  restarted automatically. Do this only once you've confirmed it on
-  hardware — a `Type=notify` unit that never sends `READY=1` is killed.
+- **systemd watchdog (optional, still disarmed)** — the sd_notify
+  plumbing is wired (`READY=1` + periodic `WATCHDOG=1`) and, since the
+  2026-08-12 fix, the ping is **gated on real ANT+ liveness** rather
+  than on a timer firing (`src/watchdog.js`). That distinction is the
+  whole point: the wedge that took the bridge blind left the event loop
+  perfectly healthy, so a timer-driven ping would have caught nothing.
+  The unit still ships `Type=simple` because the *transport*
+  (`systemd-notify`, shelled out per ping) has never run on a Pi, and
+  under `Type=notify` a broken transport means systemd kills a healthy
+  bridge every `WatchdogSec`. Arming procedure, pre-check first, is in
+  `deploy/champ-bridge.service`.
+
+## Shutdown behaviour
+
+SIGTERM runs a **hard-bounded** sequence: stop the adapters, one final
+sample flush, one `offline` heartbeat — each with its own slice of a 6s
+total budget, and a guaranteed `process.exit(0)` afterwards whatever is
+still pending (`src/shutdown.js`). Steps are best-effort: a step that
+hangs is abandoned, not awaited.
+
+This exists because on 2026-08-12 `systemctl restart` hung in
+`deactivating` and systemd had to SIGKILL the process after the default
+90s stop timeout. The block was `ant-plus-next`'s libusb
+`USBDriver.write()`, which resolves nothing when the endpoint is already
+gone; the ANT+ teardown awaited it. The unit now also sets
+`TimeoutStopSec=15` so even a pathological hang is capped.
 
 ### Pi hardening
 

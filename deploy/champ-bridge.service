@@ -33,15 +33,34 @@ After=network-online.target bluetooth.service time-sync.target
 Wants=network-online.target time-sync.target
 
 [Service]
-# Type=simple for now. The sd_notify watchdog plumbing IS wired (READY=1 at
-# startup + periodic WATCHDOG=1 from the main loop, via src/sd-notify.js), but
-# it shells out to `systemd-notify` and has NOT been verified on a real Pi.
-# To turn the watchdog on after on-Pi verification:
-#   1. flip this to `Type=notify`
-#   2. uncomment WatchdogSec + NotifyAccess below
+# ── Watchdog: still DISARMED, and the ping is no longer a placebo ────────────
+# The sd_notify plumbing is wired (READY=1 at startup + periodic WATCHDOG=1),
+# and as of the 2026-08-12 fix the ping is GATED on a real liveness signal —
+# the ANT+ supervisor's own state machine — rather than on "a timer fired".
+# That distinction matters: the 2026-08-12 wedge left the event loop perfectly
+# healthy (scan + heartbeat kept ticking for hours) while the bridge read
+# nothing, so a timer-driven ping would have sailed straight through it. See
+# src/watchdog.js.
+#
+# It stays disarmed here because the TRANSPORT is still unverified on a Pi:
+# src/sd-notify.js shells out to `systemd-notify`, and under Type=notify a
+# transport that doesn't work means systemd kills a healthy bridge every
+# WatchdogSec — strictly worse than the bug this rollout fixes. Arm it as a
+# SEPARATE change, after the bounded-shutdown fix is confirmed live:
+#
+#   1. Pre-check the transport (5 seconds, zero risk):
+#        ls -l /usr/bin/systemd-notify && systemd-notify --booted && echo BINARY-OK
+#   2. Flip Type=simple → Type=notify, uncomment WatchdogSec + NotifyAccess.
 #   3. sudo systemctl daemon-reload && sudo systemctl restart champ-bridge
-#   4. confirm `systemctl show champ-bridge -p WatchdogUSec` is non-zero and
-#      that a wedged process gets killed + restarted.
+#   4. Confirm it actually started (READY=1 arrived — if not, systemd fails the
+#      unit at TimeoutStartSec and you roll straight back to Type=simple):
+#        systemctl is-active champ-bridge
+#        systemctl show champ-bridge -p WatchdogUSec   # expect 120000000
+#   5. Watch ONE full WatchdogSec window with a strap-free room, then a
+#      deliberate stick-unplug, and confirm NEITHER restarts the service. An
+#      unplugged stick must NOT restart-loop: the predicate treats an armed
+#      reopen timer as alive, on purpose.
+#
 # NotifyAccess=all is required because the ping arrives from a short-lived
 # `systemd-notify` child, not the main node PID.
 Type=simple
@@ -56,6 +75,18 @@ Environment=NODE_ENV=production
 ExecStart=/usr/bin/node /home/pi/champ-bridge/src/index.js
 Restart=always
 RestartSec=10
+# ── Stop must be FAST ────────────────────────────────────────────────────────
+# 2026-08-12: `systemctl restart` hung in `deactivating` because the ANT+
+# teardown parked on a libusb write that never settles. systemd waited out the
+# default 90s TimeoutStopSec before SIGKILLing — a 90-second outage window on
+# every restart that hit the bug.
+#
+# The process now hard-exits within ~7.5s of SIGTERM by itself (src/shutdown.js
+# budget + guaranteed exit), so this is the backstop for the ONE case no
+# in-process timer can cover: a synchronously blocked event loop. 15s leaves
+# comfortable room above the in-process budget while capping the worst case at
+# a sixth of what it was.
+TimeoutStopSec=15
 # If the watchdog kills a wedged process, restart rather than give up.
 WatchdogSignal=SIGABRT
 # Don't fight the OS for cycles — chest-strap traffic is light.
