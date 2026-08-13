@@ -11,7 +11,7 @@ vi.mock('./api.js', () => ({
 process.env.CHAMP_BRIDGE_TOKEN = process.env.CHAMP_BRIDGE_TOKEN || 'bbr_test'
 process.env.CHAMP_API_URL = process.env.CHAMP_API_URL || 'http://localhost:3000'
 
-const { pushSample, flushSamples, pendingCount } = await import('./buffer.js')
+const { pushSample, flushSamples, drainSamples, pendingCount } = await import('./buffer.js')
 const { postSamples } = await import('./api.js')
 
 beforeEach(() => {
@@ -116,5 +116,103 @@ describe('in-flight guard (concurrent flush prevention)', () => {
     pushSample({ device_key: 'ant:12345', recorded_at: new Date().toISOString(), bpm: 121 })
     const out = await flushSamples()
     expect(out.sent).toBe(1)
+  })
+})
+
+
+// ── drainSamples — the SIGTERM path ──────────────────────────────
+//
+// flushSamples() no-ops while a flush is in flight. That is correct for the
+// 3s interval and WRONG at shutdown: it returned {sent:0,skipped:true}
+// instantly and the shutdown step logged 'ok', so everything buffered since
+// the last successful flush was lost on that restart, silently.
+describe('drainSamples (final drain on shutdown)', () => {
+  const sample = (bpm) => ({ device_key: 'ant:44670', recorded_at: new Date().toISOString(), bpm })
+
+  it('waits for the in-flight flush and then sends the remainder', async () => {
+    // Hold the first flush open mid-"request", exactly like a slow HTTPS POST
+    // when SIGTERM lands.
+    let releaseFirst
+    const firstInFlight = new Promise((res) => { releaseFirst = res })
+    const seen = []
+    postSamples
+      .mockImplementationOnce(async (chunk) => { seen.push(chunk.length); await firstInFlight; return { ok: true } })
+      .mockImplementation(async (chunk) => { seen.push(chunk.length); return { ok: true } })
+
+    pushSample(sample(120))
+    pushSample(sample(121))
+    const periodic = flushSamples()          // in flight, holding 2 samples
+
+    // Samples keep arriving while that request is open — these are the ones
+    // the old code threw away.
+    pushSample(sample(130))
+    pushSample(sample(131))
+    pushSample(sample(132))
+
+    const drainPromise = drainSamples()
+    releaseFirst()
+    const [, drained] = await Promise.all([periodic, drainPromise])
+
+    expect(drained.waited).toBe(true)
+    expect(drained.sent).toBe(3)             // the 3 that arrived mid-request
+    expect(drained.lost).toBeUndefined()
+    expect(seen).toEqual([2, 3])             // both batches actually posted
+    expect(pendingCount()).toBe(0)           // nothing left behind
+  })
+
+  it('reports `lost` when the drain cannot send (so the journal shows it)', async () => {
+    postSamples.mockResolvedValue({ ok: false, status: 503 })
+    pushSample(sample(140))
+    pushSample(sample(141))
+
+    const out = await drainSamples()
+    expect(out.sent).toBe(0)
+    expect(out.lost).toBe(2)                 // re-prepended, and REPORTED
+    expect(pendingCount()).toBe(2)
+  })
+
+  it('drains normally when no flush is in flight', async () => {
+    postSamples.mockResolvedValue({ ok: true })
+    pushSample(sample(150))
+    const out = await drainSamples()
+    expect(out.waited).toBe(false)
+    expect(out.sent).toBe(1)
+    expect(pendingCount()).toBe(0)
+  })
+
+  it('still drains when the in-flight flush REJECTS', async () => {
+    // A thrown flush must not poison the drain — its finally has already
+    // re-prepended, so the remainder is still ours to send.
+    let rejectFirst
+    const boom = new Promise((_, rej) => { rejectFirst = rej })
+    postSamples
+      .mockImplementationOnce(async () => { await boom; return { ok: true } })
+      .mockImplementation(async () => ({ ok: true }))
+
+    pushSample(sample(160))
+    const periodic = flushSamples().catch(() => {})
+    pushSample(sample(161))
+
+    const drainPromise = drainSamples()
+    rejectFirst(new Error('socket hang up'))
+    await periodic
+    const out = await drainPromise
+
+    expect(out.waited).toBe(true)
+    expect(pendingCount()).toBe(0)
+  })
+
+  it('does NOT weaken the interval guard — concurrent flushSamples still skips', async () => {
+    let release
+    const held = new Promise((res) => { release = res })
+    postSamples.mockImplementationOnce(async () => { await held; return { ok: true } })
+
+    pushSample(sample(170))
+    const first = flushSamples()
+    const second = await flushSamples()      // the interval's next tick
+    expect(second).toEqual({ sent: 0, skipped: true })
+
+    release()
+    await first
   })
 })

@@ -21,6 +21,12 @@ let buffer = []
 // snapshot and race the re-prepend-on-failure logic. While a flush is
 // running, later ticks no-op.
 let flushing = false
+// The in-flight flush itself, so a caller that must NOT no-op (the final
+// drain on the SIGTERM path) can await it instead of skipping. The interval
+// loop still skips — see flushSamples. Always cleared in the same finally
+// that clears `flushing`, so a thrown flush can never leave a stale promise
+// that a later drain would await forever.
+let inFlight = null
 
 export function pushSample(s) {
   buffer.push(s)
@@ -50,6 +56,56 @@ export async function flushSamples() {
   }
   if (buffer.length === 0) return { sent: 0 }
   flushing = true
+  const done = _runFlush()
+  inFlight = done
+  return done
+}
+
+/**
+ * The final drain, for the SIGTERM path ONLY.
+ *
+ * flushSamples() deliberately no-ops while a flush is in flight — correct for
+ * the 3s interval, fatal at shutdown: if the periodic flush happened to be
+ * mid-HTTPS-request when SIGTERM arrived, the shutdown step returned
+ * `{sent: 0, skipped: true}` INSTANTLY and reported `outcome: 'ok'`, so every
+ * sample buffered since the last successful flush was lost on that restart —
+ * silently, because nothing in the journal said otherwise.
+ *
+ * So: await the in-flight flush (it owns a snapshot we cannot see and may
+ * re-prepend it on failure), THEN flush whatever remains — the samples that
+ * arrived during that request, plus anything it handed back. Does NOT weaken
+ * the concurrency guard: this never runs a second flush in parallel, it waits
+ * for the first to finish and then takes its turn.
+ *
+ * Bounded by the caller (the shutdown step grants 2500ms via shutdown.js) —
+ * the await below is bounded only by that, which is why the caller must keep
+ * capping it. A rejected in-flight flush is swallowed: its own catch/finally
+ * has already re-prepended, so the remainder is still ours to send.
+ *
+ * @returns {Promise<{sent: number, waited?: boolean, failed?: boolean, lost?: number}>}
+ *   `lost` is set when samples remain buffered after the drain — that is data
+ *   this restart will drop, and it is reported so the journal shows it.
+ */
+export async function drainSamples() {
+  let waited = false
+  if (inFlight) {
+    waited = true
+    logDebug('buffer', 'final drain — waiting for in-flight flush')
+    await inFlight.catch(() => {})
+  }
+  const out = await flushSamples()
+  const remaining = buffer.length
+  const result = { ...out, waited }
+  if (remaining > 0) {
+    result.lost = remaining
+    logWarn('buffer', 'final drain left samples unsent — they are lost on this restart', {
+      lost: remaining, sent: out.sent ?? 0,
+    })
+  }
+  return result
+}
+
+async function _runFlush() {
   try {
     // Snapshot + clear; we'll re-prepend on partial failure.
     const snapshot = buffer
@@ -75,6 +131,7 @@ export async function flushSamples() {
     return { sent }
   } finally {
     flushing = false
+    inFlight = null
   }
 }
 

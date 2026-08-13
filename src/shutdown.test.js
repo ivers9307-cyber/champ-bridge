@@ -168,3 +168,18 @@ describe('runBoundedShutdown', () => {
     expect(Date.now() - started).toBeLessThan(1000)
   })
 })
+
+describe('step return values', () => {
+  it("carries a step's return value through as `value`", async () => {
+    // drainSamples() reports { lost } when the final drain could not send
+    // everything. runBoundedShutdown used to drop the return value, so a
+    // lossy final flush was indistinguishable from a clean one — the caller
+    // saw outcome 'ok' and nothing else. index.js now reads r.value.lost.
+    const results = await runBoundedShutdown(
+      [{ name: 'final-flush', budgetMs: 100, run: async () => ({ sent: 4, lost: 11 }) }],
+      { budgetMs: 500 },
+    )
+    expect(results[0].outcome).toBe('ok')
+    expect(results[0].value).toEqual({ sent: 4, lost: 11 })
+  })
+})

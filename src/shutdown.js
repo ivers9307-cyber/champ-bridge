@@ -102,7 +102,11 @@ export async function runBoundedShutdown(steps, opts = {}) {
       // broken seam in a test (or a future refactor) can't break the guarantee.
       const r = await settle(step.run, grantedMs, step.name).catch((err) => ({ ok: false, err }))
       const outcome = r?.ok ? 'ok' : r?.timedOut ? 'timeout' : 'error'
-      result = { name: step.name, outcome, grantedMs, err: r?.err }
+      // Carry the step's RETURN VALUE through. A step can succeed and still
+      // report something the caller must act on — drainSamples() returns
+      // `lost` when samples were still buffered after the drain. Dropping the
+      // value here is what let a lossy final flush look like a clean 'ok'.
+      result = { name: step.name, outcome, grantedMs, err: r?.err, value: r?.value }
     }
     results.push(result)
     try { onStep(result) } catch { /* logging must never break shutdown */ }
