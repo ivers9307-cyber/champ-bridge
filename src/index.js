@@ -13,7 +13,7 @@
 import { config } from './config.js'
 import { logInfo, logWarn, logError } from './log.js'
 import { createStrapSource } from './strap-source.js'
-import { pushSample, startFlushLoop, pendingCount, flushSamples } from './buffer.js'
+import { pushSample, startFlushLoop, pendingCount, drainSamples } from './buffer.js'
 import { postHeartbeat, postScan } from './api.js'
 import { runInbodyCycle, runInbodyBackfillCycle, loadInbodyState } from './inbody.js'
 import { notifyReady, notifyWatchdog, notifyStopping, watchdogPingMs, notifyStats } from './sd-notify.js'
@@ -59,7 +59,7 @@ async function fatalExit(kind, err) {
   logError('bridge', `fatal: ${kind}`, { err })
   const cancel = armHardExit(FATAL_FLUSH_MS + HARD_EXIT_GRACE_MS, 1, 'fatal exit budget exceeded')
   await runBoundedShutdown(
-    [{ name: 'final-flush', budgetMs: FATAL_FLUSH_MS, run: () => flushSamples() }],
+    [{ name: 'final-flush', budgetMs: FATAL_FLUSH_MS, run: () => drainSamples() }],
     { budgetMs: FATAL_FLUSH_MS, onStep: (r) => logInfo('bridge', 'fatal shutdown step', r) },
   )
   cancel()
@@ -247,8 +247,11 @@ async function main() {
       // start isn't fighting lingering handles. Bounded internally too.
       { name: 'straps.stop', budgetMs: 2_000, run: () => straps.stop() },
       // Drain the buffer one last time so a clean restart/deploy doesn't drop
-      // the samples collected since the last flush tick.
-      { name: 'final-flush', budgetMs: 2_500, run: () => flushSamples() },
+      // the samples collected since the last flush tick. drainSamples (NOT
+      // flushSamples) because the periodic flush may be mid-request right now:
+      // flushSamples would no-op on the in-flight guard and report 'ok' while
+      // silently dropping everything buffered since the last successful flush.
+      { name: 'final-flush', budgetMs: 2_500, run: () => drainSamples() },
       // A clean stop is 'offline', NOT 'error' — every deploy/restart used to
       // post status:'error' and spam monitoring. 'error' now means a real
       // crash (via fatalExit), which keeps the signal meaningful.
@@ -256,7 +259,12 @@ async function main() {
     ], {
       budgetMs: SHUTDOWN_BUDGET_MS,
       onStep: (r) => {
-        if (r.outcome === 'ok') logInfo('bridge', 'shutdown step ok', { step: r.name })
+        // A step can succeed and still have lost data: drainSamples returns
+        // `lost` when samples were still buffered after the drain (budget ran
+        // out, or the API is down). 'ok' alone used to hide exactly that.
+        const lost = r?.value?.lost
+        if (r.outcome === 'ok' && !lost) logInfo('bridge', 'shutdown step ok', { step: r.name })
+        else if (r.outcome === 'ok') logWarn('bridge', 'shutdown step ok but dropped samples', { step: r.name, lost })
         else logWarn('bridge', 'shutdown step did not complete', { step: r.name, outcome: r.outcome, err: r.err })
       },
     })
