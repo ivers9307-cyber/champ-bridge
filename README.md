@@ -77,7 +77,7 @@ when connectivity returns. Replays are idempotent server-side (PK on
    cd champ-bridge
    npm ci --omit=dev
    ```
-6. **Get a token from the CRM** — master logs in to crm.un1tdublin.com,
+6. **Get a token from the CRM** — master logs in to crm.repset.ie,
    POST `/api/admin/bridges` with name + location_id + hardware_id.
    Response includes the raw token (shown once).
 7. **Create `.env`** and lock it down. It holds the bearer token and
@@ -85,8 +85,13 @@ when connectivity returns. Replays are idempotent server-side (PK on
    world-readable, so restrict it to the owner:
    ```
    CHAMP_BRIDGE_TOKEN=bbr_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-   CHAMP_API_URL=https://crm.un1tdublin.com
+   CHAMP_API_URL=https://crm.repset.ie
    ```
+
+   > **Note:** these docs set the host for **new** installs only. A live
+   > Pi keeps whatever `CHAMP_API_URL` is in its `.env` until the gated
+   > per-device fleet pass updates it — devices on the legacy
+   > `crm.un1tdublin.com` host keep working meanwhile.
    ```sh
    chmod 600 .env
    ```
