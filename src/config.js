@@ -5,7 +5,11 @@
 // Required:
 //   CHAMP_BRIDGE_TOKEN     bbr_<43 chars>  shown once when admin
 //                                          creates the bridge in CRM
-//   CHAMP_API_URL          https://crm.un1tdublin.com
+//   CHAMP_API_URL          https://crm.repset.ie
+//                          (no code default — required env. A live Pi keeps
+//                          whatever host is in its .env until the gated
+//                          per-device fleet pass updates it; legacy
+//                          crm.un1tdublin.com keeps serving meanwhile.)
 //
 // Optional:
 //   FAKE_STRAPS=1          skip real hardware; emit synthetic ANT+ +
